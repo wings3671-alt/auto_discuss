@@ -518,6 +518,28 @@ def apply_state_ops(state, ops, round_no, speaker):
                     if it["id"] != op["id"]]
 
 
+def summarize_state_ops(ops):
+    """把本轮 ops 概括成一行人话,写进讨论 md 给用户看(代替碍眼的 JSON 块)。"""
+    if not ops:
+        return "本轮白板无变化。详见 STATE.md。"
+    cn = {"conclusions": "结论", "open_questions": "待解决问题",
+          "rejected": "否决方案", "constraints": "约束"}
+    adds, updates, removes = {}, [], []
+    for op in ops:
+        if op["op"] == "add":
+            adds[op["section"]] = adds.get(op["section"], 0) + 1
+        elif op["op"] == "update":
+            updates.append(op["id"])
+        elif op["op"] == "remove":
+            removes.append(op["id"])
+    parts = [f"新增 {n} 条{cn[sec]}" for sec, n in adds.items()]
+    if updates:
+        parts.append(f"修订 {'、'.join(updates)}")
+    if removes:
+        parts.append(f"删除 {'、'.join(removes)}")
+    return "本轮白板更新:" + ";".join(parts) + "。详见 STATE.md。"
+
+
 def backup_state_file(state_path, workdir, keep, log_path):
     """带时间戳备份 STATE.md,旧备份裁剪到最多 keep 份。"""
     bpath = os.path.join(workdir, f"state.backup.{stamp()}.md")
@@ -893,11 +915,15 @@ def run_ai_turn_1b(turn, round_no, topic_no, file_path, state_path, workdir,
         log(log_path, f"⚠ {name} 第 {round_no} 轮 STATE_OPS 两次均不合格"
                       f"({last_error});本轮跳过白板更新,讨论继续。")
 
-    # 程序执笔:把 AI 发言写进讨论 md
-    section_body = output
+    # 程序执笔:把 AI 发言写进讨论 md。
+    # STATE_OPS 的 JSON 块【不】写进文档(会碍眼,2026-05-17 用户改定);
+    # 改成发言末尾一行人话摘要。白板的真正更新在 STATE.md 完成。
+    discussion_part = STATE_OPS_BLOCK_RE.sub("", output).strip() or output.strip()
     if soft_fallback:
-        section_body += (f"\n\n<!-- ⚠ 本轮 STATE_OPS 不合格,白板未更新;"
-                         f"原因:{last_error} -->")
+        note = f"⚠ 本轮 STATE_OPS 不合格({last_error}),白板未更新。"
+    else:
+        note = "📋 " + summarize_state_ops(ops)
+    section_body = f"{discussion_part}\n\n> {note}"
     section = (f"\n\n---\n\n{turn_anchor}\n"
                f"### {dot} {name} · 第 {round_no} 轮\n\n"
                f"{section_body}\n")
