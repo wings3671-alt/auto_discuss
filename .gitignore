@@ -1,0 +1,9 @@
+# 运行产物,不入库
+*.backup.*.md
+discuss.backup.md
+auto_discuss.log
+discuss.lock
+discuss.md
+__pycache__/
+*.pyc
+*.tmp
