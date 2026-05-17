@@ -8,11 +8,14 @@ auto_discuss.py — 多方自动轮流讨论调度器(阶段 1a:三方轮流)
     让本机的 Claude Code、Codex,以及用户本人,围绕一份 Markdown 文档
     自动一轮一轮地交替发表意见,把一个议题讨论深、讨论透。
 
-阶段 1a(本版本)
-    一轮 = Claude → Codex → 用户。Claude、Codex 两棒自动连跑;到用户这一棒,
-    程序写一个"占位段"到文档末尾,然后停下、轮询等待用户在文档里作答。
-    用户那一轮 = 决策者指令;只有用户能终结讨论。
-    加 --no-user 可退回旧的【两方全自动版】(Claude+Codex,规则 B)。
+阶段 1a + 1b(本版本)
+    三方轮流:一轮 = Claude → Codex → 用户。Claude、Codex 两棒自动连跑;到用户
+    这一棒,程序写"占位段"并停下、轮询等待用户作答。用户那一轮 = 决策者指令;
+    只有用户能终结讨论。
+    1b 上下文优化:三方模式下 AI 不再读讨论全文。程序每轮只喂"状态白板
+    STATE.md + 对方上一轮发言";AI 只回文本(发言 + STATE_OPS 更新指令),由
+    程序执笔写讨论 md 并更新 STATE.md。格式见 1b_STATE_OPS规格.md。
+    加 --no-user 退回旧的【两方全自动版】(Claude+Codex,规则 B,读全文)。
 
 设计原则
     1. 只启动本机 CLI 的【非交互】任务,脚本本身不调用 OpenAI / Anthropic API。
@@ -48,6 +51,7 @@ auto_discuss.py — 多方自动轮流讨论调度器(阶段 1a:三方轮流)
 """
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -331,6 +335,319 @@ def load_discuss_rules(workdir, log_path):
     return DEFAULT_DISCUSS_RULES
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 1b:滚动状态白板 STATE.md  +  STATE_OPS 机器指令
+# 格式规格见 1b_STATE_OPS规格.md。程序是 STATE.md 的唯一执笔人,AI 只输出
+# STATE_OPS 指令、绝不直接改 STATE.md。
+# ════════════════════════════════════════════════════════════════════════════
+
+# 四个固定栏目:(机器 key, 编号前缀, 显示标题)
+SECTIONS = [
+    ("conclusions",    "C", "已达成的结论"),
+    ("open_questions", "Q", "待解决的问题"),
+    ("rejected",       "R", "已否决的方案"),
+    ("constraints",    "K", "关键约束 / 前提"),
+]
+SECTION_KEYS = {key for key, _p, _h in SECTIONS}
+SECTION_PREFIX = {key: prefix for key, prefix, _h in SECTIONS}
+HEADING_TO_KEY = {heading: key for key, _p, heading in SECTIONS}
+
+STATE_META_RE = re.compile(
+    r"<!--\s*STATE_META\s+next_C=(\d+)\s+next_Q=(\d+)\s+"
+    r"next_R=(\d+)\s+next_K=(\d+)\s*-->")
+STATE_ITEM_RE = re.compile(
+    r"^-\s*\[([CQRK]\d+)\]\s*(.*?)\s*"
+    r"(?:<!--\s*touched:\s*(\S+)\s*-->)?\s*$")
+ID_RE = re.compile(r"^[CQRK]\d+$")
+
+# 提取 AI 回复里的 STATE_OPS 围栏代码块(大小写不敏感,容忍空格)
+STATE_OPS_BLOCK_RE = re.compile(
+    r"(?ims)^[ \t]*```[ \t]*STATE_OPS[ \t]*\n(.*?)\n[ \t]*```[ \t]*$")
+
+# 讨论 md 里每个 AI 发言区块前的稳定锚点(供程序提取上下文 / AI 回查)
+TURN_ANCHOR_RE = re.compile(r"<!--\s*TURN\s+round=(\d+)\s+speaker=(\w+)\s*-->")
+
+
+def default_state():
+    """空白状态:四栏目皆空,编号计数器从 1 起。"""
+    return {
+        "meta": {"C": 1, "Q": 1, "R": 1, "K": 1},
+        "sections": {key: [] for key, _p, _h in SECTIONS},
+    }
+
+
+def render_state(state):
+    """把 state 渲染成 STATE.md 文本(人类可读 Markdown)。"""
+    m = state["meta"]
+    lines = [
+        f"<!-- STATE_META next_C={m['C']} next_Q={m['Q']} "
+        f"next_R={m['R']} next_K={m['K']} -->",
+        "# 讨论滚动状态",
+        "",
+        "> 本文件由调度程序独家维护,请勿手动编辑。要修正状态,在你的回合里"
+        "说明,由下一轮 AI 改。",
+        "",
+    ]
+    for key, _prefix, heading in SECTIONS:
+        lines.append(f"## {heading}")
+        for item in state["sections"][key]:
+            lines.append(
+                f"- [{item['id']}] {item['text']}   "
+                f"<!-- touched: {item['touched']} -->")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def parse_state(text):
+    """解析 STATE.md 文本为 state;缺 STATE_META 视为格式损坏,抛 ValueError。"""
+    mm = STATE_META_RE.search(text)
+    if not mm:
+        raise ValueError("缺少 STATE_META 行")
+    state = {
+        "meta": {"C": int(mm.group(1)), "Q": int(mm.group(2)),
+                 "R": int(mm.group(3)), "K": int(mm.group(4))},
+        "sections": {key: [] for key, _p, _h in SECTIONS},
+    }
+    current = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            current = HEADING_TO_KEY.get(s[3:].strip())
+        elif current and s.startswith("- ["):
+            im = STATE_ITEM_RE.match(s)
+            if im:
+                state["sections"][current].append({
+                    "id": im.group(1),
+                    "text": im.group(2).strip(),
+                    "touched": im.group(3) or "?",
+                })
+    return state
+
+
+def ensure_state_file(state_path, log_path):
+    """STATE.md 不存在则创建空白文件;存在则解析返回 state。"""
+    if os.path.exists(state_path):
+        return parse_state(read(state_path))
+    state = default_state()
+    write(state_path, render_state(state))
+    log(log_path, f"未发现状态白板,已创建空白 {os.path.basename(state_path)}。")
+    return state
+
+
+def live_ids(state):
+    """当前白板上所有便签编号的集合。"""
+    ids = set()
+    for key, _p, _h in SECTIONS:
+        for item in state["sections"][key]:
+            ids.add(item["id"])
+    return ids
+
+
+def extract_state_ops_block(text):
+    """从 AI 回复里提取 STATE_OPS 代码块。返回 (块内容 or None, 命中个数)。"""
+    blocks = STATE_OPS_BLOCK_RE.findall(text)
+    if not blocks:
+        return None, 0
+    return blocks[-1], len(blocks)
+
+
+def validate_state_ops(obj, state):
+    """严格校验 STATE_OPS JSON 对象。返回 (ok, 错误说明)。"""
+    if not isinstance(obj, dict):
+        return False, "顶层不是 JSON 对象"
+    if set(obj.keys()) != {"ops"}:
+        return False, "顶层对象只能有 ops 一个键"
+    ops = obj["ops"]
+    if not isinstance(ops, list):
+        return False, "ops 必须是数组"
+    ids = live_ids(state)
+    referenced = set()
+    for i, op in enumerate(ops, 1):
+        if not isinstance(op, dict):
+            return False, f"第 {i} 条操作不是对象"
+        kind = op.get("op")
+        if kind == "add":
+            if set(op.keys()) != {"op", "section", "text"}:
+                return False, f"第 {i} 条 add 必须且只能有 op/section/text 字段"
+            if op["section"] not in SECTION_KEYS:
+                return False, f"第 {i} 条 section 非法:{op.get('section')}"
+            if not isinstance(op["text"], str) or not op["text"].strip():
+                return False, f"第 {i} 条 text 不能为空"
+        elif kind in ("update", "remove"):
+            need = {"op", "id", "text"} if kind == "update" else {"op", "id"}
+            if set(op.keys()) != need:
+                return False, f"第 {i} 条 {kind} 字段不符(应为 {sorted(need)})"
+            oid = op.get("id")
+            if not isinstance(oid, str) or not ID_RE.match(oid):
+                return False, f"第 {i} 条 id 格式非法:{oid}"
+            if oid not in ids:
+                return False, f"第 {i} 条 id 在白板上不存在:{oid}"
+            if oid in referenced:
+                return False, f"编号 {oid} 在同一批里被引用多次"
+            referenced.add(oid)
+            if kind == "update" and (not isinstance(op["text"], str)
+                                     or not op["text"].strip()):
+                return False, f"第 {i} 条 text 不能为空"
+        else:
+            return False, f"第 {i} 条 op 非法:{kind}"
+    return True, None
+
+
+def apply_state_ops(state, ops, round_no, speaker):
+    """把已校验通过的 ops 应用到 state(原地修改)。"""
+    touched = f"r{round_no}-{speaker.lower()}"
+    for op in ops:
+        kind = op["op"]
+        if kind == "add":
+            key = op["section"]
+            prefix = SECTION_PREFIX[key]
+            new_id = f"{prefix}{state['meta'][prefix]}"
+            state["meta"][prefix] += 1
+            state["sections"][key].append({
+                "id": new_id, "text": op["text"].strip(), "touched": touched})
+        elif kind == "update":
+            for key, _p, _h in SECTIONS:
+                for item in state["sections"][key]:
+                    if item["id"] == op["id"]:
+                        item["text"] = op["text"].strip()
+                        item["touched"] = touched
+        elif kind == "remove":
+            for key, _p, _h in SECTIONS:
+                state["sections"][key] = [
+                    it for it in state["sections"][key]
+                    if it["id"] != op["id"]]
+
+
+def backup_state_file(state_path, workdir, keep, log_path):
+    """带时间戳备份 STATE.md,旧备份裁剪到最多 keep 份。"""
+    bpath = os.path.join(workdir, f"state.backup.{stamp()}.md")
+    shutil.copy2(state_path, bpath)
+    backups = sorted(
+        f for f in os.listdir(workdir)
+        if re.fullmatch(r"state\.backup\.\d{8}-\d{6}\.md", f))
+    for old in backups[:-keep] if keep > 0 else []:
+        try:
+            os.remove(os.path.join(workdir, old))
+        except OSError:
+            pass
+
+
+# ── 讨论 md 分段提取(1b 喂上下文用)────────────────────────────────────────
+def extract_topic_intro(disc_text):
+    """议题区:状态块之后、第一个发言区块之前的文字(标题 + 用户写的议题)。"""
+    body = body_of(disc_text)
+    cut = len(body)
+    for pat in (r"<!--\s*TURN\s", r"<!--\s*USER_TURN_START\s"):
+        m = re.search(pat, body)
+        if m:
+            cut = min(cut, m.start())
+    return body[:cut].strip().rstrip("-").strip()
+
+
+def extract_ai_section(disc_text, speaker):
+    """返回某 AI(CLAUDE/CODEX)最近一轮发言正文,剔除锚点与 STATE_OPS 块。
+    没有则返回 None。"""
+    target = None
+    for m in TURN_ANCHOR_RE.finditer(disc_text):
+        if m.group(2).upper() == speaker:
+            target = m
+    if target is None:
+        return None
+    start = target.end()
+    nxt = len(disc_text)
+    nm = TURN_ANCHOR_RE.search(disc_text, start)
+    if nm:
+        nxt = nm.start()
+    um = re.search(r"<!--\s*USER_TURN_START\s", disc_text[start:nxt])
+    if um:
+        nxt = start + um.start()
+    section = STATE_OPS_BLOCK_RE.sub("", disc_text[start:nxt])
+    section = re.sub(r"\n+\s*-{3,}\s*$", "", section.strip())
+    return section.strip() or None
+
+
+# ── 1b:AI 回合提示词 ───────────────────────────────────────────────────────
+STATE_OPS_GUIDE = """\
+STATE_OPS 代码块 —— 告诉程序如何更新状态白板(程序会机械执行):
+- 写成一个围栏代码块,信息串写 STATE_OPS,块内容是一个合法 JSON 对象。
+- 形如:  {"ops": [ ...操作... ]}    ops 是数组;本轮无需改动就写 {"ops": []}
+- 每条操作是下面三种之一:
+    新增一条:  {"op": "add", "section": "<栏目>", "text": "<内容>"}
+    修改一条:  {"op": "update", "id": "<编号>", "text": "<新内容>"}
+    删除一条:  {"op": "remove", "id": "<编号>"}
+- <栏目> 四选一:conclusions(已达成的结论) / open_questions(待解决的问题)
+                  / rejected(已否决的方案) / constraints(关键约束 / 前提)
+- <编号> 必须是白板上【已存在】的(如 C1、Q2、R1、K3)。新增条目不要自己写
+  编号,程序会分配。每个编号在同一批里最多引用一次。
+- rejected 条目的 text 要同时写清"方案"和"否决原因"。
+- "某问题解决了" = 一条 remove 删掉那个 Q + 一条 add 加一条新结论。
+- 不要写规定之外的字段。每轮都必须输出 STATE_OPS 块。
+示例:
+```STATE_OPS
+{"ops": [
+  {"op": "remove", "id": "Q3"},
+  {"op": "add", "section": "conclusions", "text": "推送时间按当天潮汐动态计算"}
+]}
+```"""
+
+
+def build_prompt_1b(turn, round_no, topic_no, topic_intro, file_path,
+                    discuss_rules, state_text, other_section, user_opinion):
+    """1b 三方模式 AI 回合的提示词:喂 bounded 上下文,要 AI 只输出文本。"""
+    _dot, name = SPEAKER[turn]
+    other_name = "Codex" if turn == "CLAUDE" else "Claude Code"
+    parts = [
+        f"你正在参与一份多方协作讨论。当前轮到你(**{name}**)发言,"
+        f"这是第 {round_no} 轮、话题 {topic_no}。",
+        "",
+        "【讨论守则 —— 每轮必读】",
+        discuss_rules.strip(),
+        "",
+        "【议题】",
+        topic_intro.strip() if topic_intro.strip() else "(见讨论文档开头)",
+        "",
+        "【当前状态白板 STATE.md】",
+        "这是到目前为止讨论的结构化汇总,是你了解前情的【主要依据】:",
+        "————",
+        state_text.strip(),
+        "————",
+        "",
+    ]
+    if other_section:
+        parts += [f"【{other_name} 最近一轮发言】", other_section.strip(), ""]
+    else:
+        parts += ["【对方尚无发言】(本轮之前对方还没发过言)", ""]
+    if user_opinion and user_opinion.strip():
+        parts += [
+            "【用户(项目决策者)最近一轮发言 —— 本轮必须执行项】",
+            "用户是本项目决策者,不是普通的第三方意见。下面是用户原文(全文,"
+            "不得压缩),你必须逐条照办、不得敷衍;若用户要求查网页或资料,你"
+            "必须真的联网去查,不许凭印象作答:",
+            "——用户原文——",
+            user_opinion.strip(),
+            "——用户原文结束——",
+            "",
+        ]
+    parts += [
+        "【你这一轮要做的】",
+        f"1. 基于白板和上面的最新发言,发表你第 {round_no} 轮的意见。遵守讨论"
+        f"守则:批判性审视、指出漏洞与风险、提发散思路,不要无条件附和。",
+        f"2. 若白板上某条信息你觉得不够、需要看原文:完整讨论记录在文件 "
+        f"{file_path},按『第 X 轮』分段,你可以读它回查【特定轮次】——但不要"
+        f"整篇通读(那会很慢很贵)。平时靠白板即可。",
+        "3. 【重要】你不要编辑或写入任何文件。把你的发言直接作为回复【输出成"
+        "文字】,程序会替你把它写进讨论文档。",
+        "4. 在发言正文之后、另起一行,输出一个 STATE_OPS 代码块,告诉程序如何"
+        "把这一轮的新进展更新进白板。",
+        "",
+        STATE_OPS_GUIDE,
+        "",
+        "【输出格式】先输出你的发言正文(Markdown,不要写小节标题,程序会加),"
+        "紧接着输出 STATE_OPS 代码块。不要任何额外前言或解释。",
+    ]
+    return "\n".join(parts)
+
+
 # ── 文件锁 ──────────────────────────────────────────────────────────────────
 def acquire_lock(lock_path, timeout, file_path, log_path):
     """拿到锁返回 True;锁被占用且未过期返回 False。"""
@@ -443,8 +760,9 @@ def build_prompt(turn, round_no, topic, file_path, discuss_rules,
     return "\n".join(lines)
 
 
-def call_claude(prompt, workdir, timeout, log_path):
-    """调用 Claude Code CLI 的非交互模式。"""
+def call_claude(prompt, workdir, timeout, log_path, allow_write=True):
+    """调用 Claude Code CLI 的非交互模式。allow_write=False(1b)时不开自动
+    编辑:AI 只读文件回查、不写文件,发言从 stdout 收。"""
     claude = find_cli("claude", CLAUDE_FALLBACK)
     # 剔除 Claude Code 自身的会话环境变量(CLAUDE* / AI_AGENT):否则当本脚本
     # 是从一个 Claude Code 会话里启动时,被调起的 claude 会误以为自己嵌套在
@@ -455,34 +773,145 @@ def call_claude(prompt, workdir, timeout, log_path):
     env.pop("ANTHROPIC_API_KEY", None)
     # 注意:不加 --add-dir。它是变长参数,会把后面的 prompt 一并吞掉,导致
     # claude 收不到提示词。工作目录(cwd)已是文档所在目录,无需 --add-dir。
-    cmd = [
-        claude, "-p",
-        "--permission-mode", "acceptEdits",   # 自动批准文件编辑,实现无人值守
-        prompt,
-    ]
-    log(log_path, f"调用 Claude Code CLI(cwd={workdir})…")
+    cmd = [claude, "-p"]
+    if allow_write:                           # 1a 旧路径:开自动编辑,AI 直接写文件
+        cmd += ["--permission-mode", "acceptEdits"]
+    cmd.append(prompt)
+    log(log_path, f"调用 Claude Code CLI(cwd={workdir},写权限={allow_write})…")
     return subprocess.run(cmd, cwd=workdir, env=env,
                           capture_output=True, text=True, timeout=timeout)
 
 
-def call_codex(prompt, workdir, timeout, log_path):
-    """调用 Codex CLI 的非交互模式(codex exec)。"""
+def call_codex(prompt, workdir, timeout, log_path, allow_write=True):
+    """调用 Codex CLI 的非交互模式(codex exec)。allow_write=False(1b)时用
+    read-only 沙箱:AI 可读文件回查、不可写。"""
     codex = find_cli("codex", CODEX_FALLBACK)
     env = os.environ.copy()
     # 不继承 API key:让 codex 走本机已登录账号(ChatGPT 订阅);未登录则失败
     env.pop("OPENAI_API_KEY", None)
+    sandbox = "workspace-write" if allow_write else "read-only"
     cmd = [
         codex,
         "-a", "never",                   # 无人值守:从不停下来等人工审批
         "exec",
         "-C", workdir,                   # 工作根目录
         "--skip-git-repo-check",         # 桌面不是 git 仓库,跳过检查
-        "-s", "workspace-write",         # 允许在工作目录内写文档
+        "-s", sandbox,                   # 1a 写文档 workspace-write;1b 回查 read-only
         prompt,
     ]
-    log(log_path, f"调用 Codex CLI(cwd={workdir})…")
+    log(log_path, f"调用 Codex CLI(cwd={workdir},sandbox={sandbox})…")
     return subprocess.run(cmd, cwd=workdir, env=env,
                           capture_output=True, text=True, timeout=timeout)
+
+
+# ── 1b:三方模式 AI 回合(程序执笔)──────────────────────────────────────────
+def run_ai_turn_1b(turn, round_no, topic_no, file_path, state_path, workdir,
+                   discuss_rules, timeout, keep_backups, log_path):
+    """1b 三方模式下的一个 AI 回合。返回 {'ok': bool, 'error': str|None}。
+
+    方案乙:AI 不碰任何文件 —— 程序喂 bounded 上下文,AI 只把"发言 +
+    STATE_OPS 更新指令"作为回复输出;程序据此写讨论 md、更新 STATE.md。"""
+    dot, name = SPEAKER[turn]
+    turn_anchor = f"<!-- TURN round={round_no} speaker={turn} -->"
+
+    disc = read(file_path)
+    if turn_anchor in disc:
+        # 断点续跑:本轮区块上次已写过,不重跑、不重复调 CLI
+        log(log_path, f"第 {round_no} 轮 {name} 发言区块已存在,跳过(断点续跑)。")
+        return {"ok": True, "error": None}
+
+    # 备份讨论 md;STATE.md 若已存在也备份
+    make_backup(file_path, workdir, keep_backups, log_path)
+    state_existed = os.path.exists(state_path)
+    try:
+        state = ensure_state_file(state_path, log_path)
+    except ValueError as e:
+        return {"ok": False,
+                "error": f"STATE.md 格式损坏({e}),请人工检查 {state_path}"}
+    if state_existed:
+        backup_state_file(state_path, workdir, keep_backups, log_path)
+
+    # 组装 bounded 上下文:议题 + 白板 + 对方上一轮 + 用户上一轮
+    topic_intro = extract_topic_intro(disc)
+    other = "CODEX" if turn == "CLAUDE" else "CLAUDE"
+    other_section = extract_ai_section(disc, other)
+    user_sec = latest_user_section(disc)
+    user_opinion = extract_user_opinion(user_sec) if user_sec else None
+    state_text = read(state_path)
+    base_prompt = build_prompt_1b(
+        turn, round_no, topic_no, topic_intro, file_path, discuss_rules,
+        state_text, other_section, user_opinion)
+
+    # 调 CLI;最多两次,以拿到合法的 STATE_OPS
+    ops, output, last_error = None, "", None
+    for attempt in (1, 2):
+        if attempt == 1:
+            prompt = base_prompt
+        else:
+            log(log_path, f"{name} STATE_OPS 不合格,重试(因:{last_error})")
+            prompt = (base_prompt + f"\n\n【重要纠正】你上次回复的 STATE_OPS "
+                      f"有问题:{last_error}。请重新完整作答(发言正文 + "
+                      f"STATE_OPS 代码块),务必让 STATE_OPS 是合法 JSON 且"
+                      f"符合上面说明的格式。")
+        try:
+            if turn == "CLAUDE":
+                result = call_claude(prompt, workdir, timeout, log_path,
+                                     allow_write=False)
+            else:
+                result = call_codex(prompt, workdir, timeout, log_path,
+                                    allow_write=False)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": f"{name} 调用超时(>{timeout}s)"}
+        log(log_path, f"{name} 退出码 = {result.returncode}")
+        if (result.stderr or "").strip():
+            log(log_path, f"{name} stderr 末尾:\n{(result.stderr or '')[-500:]}")
+        if result.returncode != 0:
+            return {"ok": False, "error": f"{name} CLI 返回非 0"}
+        output = (result.stdout or "").strip()
+        if len(output) < MIN_APPENDED_CHARS:
+            last_error = f"回复过短({len(output)} 字符)"
+            continue
+        block, count = extract_state_ops_block(output)
+        if count != 1:
+            last_error = f"找到 {count} 个 STATE_OPS 代码块(应恰好 1 个)"
+            continue
+        try:
+            obj = json.loads(block)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = f"STATE_OPS 不是合法 JSON({e})"
+            continue
+        valid, verr = validate_state_ops(obj, state)
+        if not valid:
+            last_error = f"STATE_OPS 不合 schema({verr})"
+            continue
+        ops = obj["ops"]
+        break
+
+    soft_fallback = ops is None
+    if soft_fallback:                       # 两次都不合格 → 软兜底,讨论继续
+        ops = []
+        log(log_path, f"⚠ {name} 第 {round_no} 轮 STATE_OPS 两次均不合格"
+                      f"({last_error});本轮跳过白板更新,讨论继续。")
+
+    # 程序执笔:把 AI 发言写进讨论 md
+    section_body = output
+    if soft_fallback:
+        section_body += (f"\n\n<!-- ⚠ 本轮 STATE_OPS 不合格,白板未更新;"
+                         f"原因:{last_error} -->")
+    section = (f"\n\n---\n\n{turn_anchor}\n"
+               f"### {dot} {name} · 第 {round_no} 轮\n\n"
+               f"{section_body}\n")
+    write(file_path, read(file_path).rstrip() + section)
+    log(log_path, f"已写入第 {round_no} 轮 {name} 发言区块。")
+
+    # 按 STATE_OPS 更新 STATE.md
+    if ops:
+        apply_state_ops(state, ops, round_no, turn)
+        write(state_path, render_state(state))
+        log(log_path, f"STATE.md 已更新:应用 {len(ops)} 条操作。")
+    else:
+        log(log_path, "STATE.md 本轮无变化。")
+    return {"ok": True, "error": None}
 
 
 # ── 用户回合:轮询等待 ──────────────────────────────────────────────────────
@@ -544,6 +973,8 @@ def main():
     workdir = os.path.dirname(file_path)
     lock_path = os.path.join(workdir, "discuss.lock")
     log_path = os.path.join(workdir, "auto_discuss.log")
+    state_path = (file_path[:-3] if file_path.endswith(".md")
+                  else file_path) + ".state.md"
     three_party = not args.no_user
     dry = args.dry_run
 
@@ -603,8 +1034,23 @@ def main():
             if turn in ("CLAUDE", "CODEX"):
                 if dry:
                     log(log_path, f"[dry-run] 此处本应调用 {writer_name},已跳过。")
+                elif three_party:
+                    # 1b 机制:程序执笔。喂 bounded 上下文,AI 只回文本,
+                    # 程序写讨论 md、按 STATE_OPS 更新 STATE.md。
+                    status["status"] = "RUNNING"
+                    write(file_path, write_status_into(read(file_path), status))
+                    rules_1b = load_discuss_rules(workdir, log_path)
+                    res = run_ai_turn_1b(
+                        turn, round_no, topic, file_path, state_path, workdir,
+                        rules_1b, args.timeout, args.keep_backups, log_path)
+                    if not res["ok"]:
+                        log(log_path, f"错误:{res['error']},退出。")
+                        status["status"] = "ERROR"
+                        write(file_path,
+                              write_status_into(read(file_path), status))
+                        break
                 else:
-                    # 取用户上一轮意见(三方模式),注入本轮 AI 提示词
+                    # 取用户上一轮意见(--no-user 旧两方路径不会有用户回合)
                     user_opinion = None
                     if three_party:
                         sec = latest_user_section(read(file_path))
