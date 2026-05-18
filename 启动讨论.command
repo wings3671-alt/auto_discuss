@@ -48,8 +48,10 @@ echo ""
 
 FILE=""
 if [ "$CHOICE" = "1" ]; then
-  # —— 新建:起名 → 建骨架文件 → VS Code 打开让用户写议题 ——
-  read -r -p "给这场讨论起个名字(例:潮汐推送方案):" TITLE
+  # —— 新建:起名(仅文件名)→ 建骨架 → VS Code 打开让用户写问题 ——
+  echo "第 1 步 · 给这场讨论起个名字。"
+  echo "         (只用作文件名;你真正要讨论的【问题】下一步在 VS Code 里写。)"
+  read -r -p "讨论名字(例:潮汐推送方案):" TITLE
   [ -z "$TITLE" ] && TITLE="讨论"
   SAFE=$(echo "$TITLE" | tr ' /:' '___')          # 去掉文件名里不能用的字符
   FILE="$DISCUSS_DIR/${SAFE}_$(date +%m%d).md"
@@ -59,18 +61,21 @@ if [ "$CHOICE" = "1" ]; then
 
 ## 话题 1
 
+在下面写下你想讨论的问题 / 需求(写得越具体,讨论越到点),写完按 ⌘S 保存:
+
 
 EOF
-  echo "✓ 已新建讨论文件:"
+  echo ""
+  echo "✓ 已新建讨论文件,并在 VS Code 打开:"
   echo "  $FILE"
-  echo ""
   open -a "Visual Studio Code" "$FILE" 2>/dev/null || open "$FILE"
-  echo "→ 已在 VS Code 打开,屏幕中央会弹出一个提示框。"
-  echo "  在「## 话题 1」下面写好议题、保存(⌘S),再到提示框点【开始讨论】。"
   echo ""
-  # 用浮在最上层的原生弹窗代替"回终端按键":终端窗口会被 VS Code 挡住、
-  # 用户看不到提示;弹窗则总在最前。点【取消】则放弃本次启动。
-  DLG='display dialog "在 VS Code 里写好议题、保存(⌘S),然后点【开始讨论】。" & return & return & "提示:直接写议题就行,不用打 over —— over 是讨论开始后、轮到你发言时才用的标记。" buttons {"取消", "开始讨论"} default button "开始讨论" cancel button "取消" with title "auto_discuss · 多方讨论"'
+  echo "第 2 步 · 到刚打开的 VS Code 窗口,在「## 话题 1」下面写下你真正"
+  echo "         想讨论的【问题 / 需求】,然后保存(⌘S)。"
+  echo "第 3 步 · 回到屏幕上的弹窗,点【开始讨论】。"
+  echo ""
+  # 浮在最上层的原生弹窗代替"回终端按键"(终端窗口会被 VS Code 挡住,弹窗不会)
+  DLG='display dialog "你要讨论的【问题】写在哪里?" & return & "→ 就在刚打开的那个 VS Code 文件里,「## 话题 1」标题下面。" & return & return & "在那里写好问题 / 需求并保存(⌘S),再点【开始讨论】。" & return & return & "(直接写问题就行,不用打 over。)" buttons {"取消", "开始讨论"} default button "开始讨论" cancel button "取消" with title "auto_discuss · 写好问题了吗"'
   if ! osascript -e "$DLG" >/dev/null 2>&1; then
     echo "已取消,没有开始讨论。讨论文件已建好,下次用「继续已有讨论」可打开:"
     echo "  $FILE"
