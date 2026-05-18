@@ -7,3 +7,6 @@ discuss.md
 __pycache__/
 *.pyc
 *.tmp
+
+# 讨论记录(可能含个人内容,永不上传 GitHub)
+讨论记录/

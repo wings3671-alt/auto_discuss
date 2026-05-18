@@ -14,7 +14,7 @@ export PYTHONUTF8=1
 export LANG="en_US.UTF-8"
 
 SCRIPT="$HOME/Developer/auto_discuss/auto_discuss.py"
-DISCUSS_DIR="$HOME/Desktop/讨论记录"
+DISCUSS_DIR="$HOME/Developer/auto_discuss/讨论记录"
 
 line() { echo "════════════════════════════════════════"; }
 pause_exit() { echo ""; read -n1 -r -p "按任意键关闭本窗口。"; exit "${1:-0}"; }
