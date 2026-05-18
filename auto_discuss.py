@@ -139,11 +139,21 @@ def read(path):
 
 
 def write(path, text):
-    """原子写:先写临时文件再 os.replace,避免中途崩溃留下半截文件。"""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    """原地写:直接覆盖原文件,保持 inode 不变。
+
+    不再用「写临时文件 + os.replace」那种原子写——它每次写都会让文件换一个
+    新 inode,VS Code 等编辑器里已打开的标签页会因此与磁盘脱钩、停在旧内容
+    不刷新(2026-05-18 实地踩坑)。改为原地覆盖:inode 不变,编辑器能正常
+    跟随刷新。中途崩溃留半截文件的风险,由每轮调用前的时间戳备份兜底
+    (见 make_backup / backup_state_file)。
+
+    用 r+ 而非 w:先写新内容、再 truncate 掉多余旧尾巴,文件在任一时刻都是
+    「完整旧内容」或「完整新内容」,不会出现 w 模式下先清空文件的空窗。
+    文件不存在时退回 w 模式新建。"""
+    mode = "r+" if os.path.exists(path) else "w"
+    with open(path, mode, encoding="utf-8") as f:
         f.write(text)
-    os.replace(tmp, path)
+        f.truncate()
 
 
 # ── 状态块解析 / 渲染 ───────────────────────────────────────────────────────
