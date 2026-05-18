@@ -65,10 +65,17 @@ EOF
   echo "  $FILE"
   echo ""
   open -a "Visual Studio Code" "$FILE" 2>/dev/null || open "$FILE"
-  echo "→ 已在 VS Code 打开。请在「## 话题 1」下面写下你想讨论的"
-  echo "  议题 / 需求(写得越具体,AI 讨论越到点),然后保存(⌘S)。"
+  echo "→ 已在 VS Code 打开,屏幕中央会弹出一个提示框。"
+  echo "  在「## 话题 1」下面写好议题、保存(⌘S),再到提示框点【开始讨论】。"
   echo ""
-  read -n1 -r -p "写好并保存后,回到本窗口按任意键开始……"
+  # 用浮在最上层的原生弹窗代替"回终端按键":终端窗口会被 VS Code 挡住、
+  # 用户看不到提示;弹窗则总在最前。点【取消】则放弃本次启动。
+  DLG='display dialog "在 VS Code 里写好议题、保存(⌘S),然后点【开始讨论】。" & return & return & "提示:直接写议题就行,不用打 over —— over 是讨论开始后、轮到你发言时才用的标记。" buttons {"取消", "开始讨论"} default button "开始讨论" cancel button "取消" with title "auto_discuss · 多方讨论"'
+  if ! osascript -e "$DLG" >/dev/null 2>&1; then
+    echo "已取消,没有开始讨论。讨论文件已建好,下次用「继续已有讨论」可打开:"
+    echo "  $FILE"
+    pause_exit 0
+  fi
   echo ""
 elif [ "$CHOICE" = "2" ]; then
   # —— 继续:列出已有讨论文件供选择 ——
