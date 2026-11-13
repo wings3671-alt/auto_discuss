@@ -971,6 +971,12 @@ def wait_for_user(file_path, lock_path, round_no, interval, log_path):
         if section is not None:
             marker = find_user_marker(section)
             if marker:
+                # VS Code 的 afterDelay 保存刚落盘时，先确认内容稳定，再由脚本
+                # 改状态和写下一轮，避免编辑器保存收尾与外部写入紧贴发生冲突。
+                snapshot = text
+                time.sleep(1)
+                if read(file_path) != snapshot:
+                    continue
                 log(log_path, f"检测到用户标记:『{marker}』。")
                 return marker
             # 4A.3:已有实质内容但没标记 → 继续等待,并提示一次
