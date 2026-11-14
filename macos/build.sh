@@ -1,5 +1,5 @@
 #!/bin/bash
-# 生成「讨论群.app」。改了 macos/ 里的文件、或把项目文件夹搬了位置之后,重新运行一次。
+# 生成「胡说八道群.app」。改了 macos/ 里的文件、或把项目文件夹搬了位置之后,重新运行一次。
 #
 #   bash macos/build.sh
 #
@@ -9,7 +9,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-APP="$ROOT/讨论群.app"
+APP="$ROOT/胡说八道群.app"
 WORK="$(mktemp -d)"
 MIN_MACOS="13.0"
 VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/discuss/__init__.py")"
@@ -38,8 +38,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>讨论群</string>
-  <key>CFBundleDisplayName</key><string>讨论群</string>
+  <key>CFBundleName</key><string>胡说八道群</string>
+  <key>CFBundleDisplayName</key><string>胡说八道群</string>
   <key>CFBundleIdentifier</key><string>local.autodiscuss.app</string>
   <key>CFBundleExecutable</key><string>discuss-app</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>

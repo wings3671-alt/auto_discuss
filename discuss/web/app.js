@@ -1,4 +1,4 @@
-// 讨论群界面。不保存任何数据:一切以后台为准,后台一有变化就重新取一遍再画。
+// 胡说八道群界面。不保存任何数据:一切以后台为准,后台一有变化就重新取一遍再画。
 import { renderMarkdown } from "/web/markdown.js";
 
 const $ = (id) => document.getElementById(id);
@@ -44,7 +44,7 @@ const api = {
   setAvatar: (memberId, file) => call("POST", `/api/avatars/${enc(memberId)}`, file),
 };
 
-// 运行在「讨论群.app」里时,把状态告诉它(用于退出确认、程序坞提醒)
+// 运行在「胡说八道群.app」里时,把状态告诉它(用于退出确认、程序坞提醒)
 const tellApp = (message) => window.webkit?.messageHandlers?.app?.postMessage(message);
 
 // ── 小工具 ────────────────────────────────────────────────────────────────
@@ -249,7 +249,7 @@ function renderChat({ toEnd = false } = {}) {
   const chat = $("chat");
   const view = state.view;
   if (!view) {
-    chat.innerHTML = `<div class="welcome"><div><b>讨论群</b>在左边选一场讨论,或者新建一场。</div></div>`;
+    chat.innerHTML = `<div class="welcome"><div><b>胡说八道群</b>在左边选一场讨论,或者新建一场。</div></div>`;
     return;
   }
   const nearEnd = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;

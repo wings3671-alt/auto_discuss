@@ -1,4 +1,4 @@
-// 讨论群.app 的外壳:一个原生窗口,里面显示本机网页界面。
+// 胡说八道群.app 的外壳:一个原生窗口,里面显示本机网页界面。
 //
 // 启动时在后台拉起 Python 服务(python3 -m discuss),等它报告端口后载入界面;
 // 退出时把服务一起关掉。关窗口只是隐藏,AI 可以继续把话说完。
@@ -35,13 +35,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 840),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "讨论群"
+        window.title = "胡说八道群"
         window.minSize = NSSize(width: 760, height: 520)
         window.contentView = web
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.center()
-        window.setFrameAutosaveName("讨论群主窗口")
+        window.setFrameAutosaveName("胡说八道群主窗口")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -153,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             NSApp.requestUserAttention(.informationalRequest)
             NSApp.dockTile.badgeLabel = "!"
             let content = UNMutableNotificationContent()
-            content.title = body["title"] as? String ?? "讨论群"
+            content.title = body["title"] as? String ?? "胡说八道群"
             content.body = body["body"] as? String ?? ""
             content.sound = .default
             UNUserNotificationCenter.current().add(
@@ -205,11 +205,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             entry.keyEquivalentModifierMask = modifiers
             return entry
         }
-        menu("讨论群", [
-            item("关于讨论群", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+        menu("胡说八道群", [
+            item("关于胡说八道群", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
-            item("隐藏讨论群", #selector(NSApplication.hide(_:)), "h"),
-            item("退出讨论群", #selector(NSApplication.terminate(_:)), "q"),
+            item("隐藏胡说八道群", #selector(NSApplication.hide(_:)), "h"),
+            item("退出胡说八道群", #selector(NSApplication.terminate(_:)), "q"),
         ])
         menu("编辑", [
             item("撤销", Selector(("undo:")), "z"),

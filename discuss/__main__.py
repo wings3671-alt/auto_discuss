@@ -1,6 +1,6 @@
 """启动入口:python3 -m discuss
 
-正常使用时由「讨论群.app」启动本程序;也可以在终端里直接运行,再用浏览器打开
+正常使用时由「胡说八道群.app」启动本程序;也可以在终端里直接运行,再用浏览器打开
 它打印出来的地址。
 """
 
@@ -21,7 +21,7 @@ from .server import serve
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="讨论群:多个 AI 与你轮流讨论")
+    parser = argparse.ArgumentParser(description="胡说八道群:多个 AI 与你轮流讨论")
     parser.add_argument("--root", type=Path, default=project_root(),
                         help="数据所在的文件夹(默认是程序所在的项目文件夹)")
     parser.add_argument("--port", type=int, help="监听端口(默认用设置里的)")

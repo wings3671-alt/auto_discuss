@@ -53,7 +53,7 @@ class Paths:
 
     @property
     def log(self) -> Path:
-        return self.data / "讨论群.log"
+        return self.data / "胡说八道群.log"
 
     def ensure(self) -> None:
         for folder in (self.discussions, self.data, self.backups, self.avatars):
