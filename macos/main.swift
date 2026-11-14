@@ -158,6 +158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             content.sound = .default
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        } else if type == "appearance" {
+            // 设置里选了浅色 / 深色就让整个窗口(连同标题栏)跟着变;"跟随系统"则不干预
+            let forced: [String: NSAppearance.Name] = ["light": .aqua, "dark": .darkAqua]
+            window.appearance = forced[body["theme"] as? String ?? ""].flatMap(NSAppearance.init(named:))
+            web.pageZoom = CGFloat(body["zoom"] as? Double ?? 1)
         }
     }
 

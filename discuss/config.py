@@ -12,6 +12,8 @@ from typing import Any
 USER_ID = "USER"
 MEMBER_ID_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,15}$")
 AI_KINDS = ("claude", "codex", "ollama", "command")
+THEMES = ("auto", "light", "dark")
+TEXT_SIZES = ("small", "medium", "large", "xlarge")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -22,6 +24,7 @@ class Paths:
 
     root: Path
     trash: Path = field(default_factory=lambda: Path.home() / ".Trash")
+    downloads: Path = field(default_factory=lambda: Path.home() / "Downloads")
 
     @property
     def discussions(self) -> Path:
@@ -42,6 +45,10 @@ class Paths:
     @property
     def sync_log(self) -> Path:
         return self.data / "同步记录.json"
+
+    @property
+    def pins(self) -> Path:
+        return self.data / "置顶.json"
 
     @property
     def backups(self) -> Path:
@@ -71,6 +78,10 @@ def _str(value: Any, default: str) -> str:
 
 def _bool(value: Any, default: bool) -> bool:
     return value if isinstance(value, bool) else default
+
+
+def _choice(value: Any, options: tuple[str, ...], default: str) -> str:
+    return value if isinstance(value, str) and value in options else default
 
 
 def _int(value: Any, default: int, low: int, high: int) -> int:
@@ -136,6 +147,8 @@ class Settings:
     turn_timeout: int = 600                 # 单次 AI 调用的超时秒数
     whiteboard_limit: int = 6000            # 白板超过这么多 token 就提示整理
     keep_backups: int = 10
+    theme: str = "auto"                     # 外观:auto(跟随系统)/ light / dark
+    text_size: str = "medium"               # 字号:small / medium / large / xlarge
     user: Member = field(default_factory=default_user)
     members: list[Member] = field(default_factory=default_members)
 
@@ -156,6 +169,8 @@ class Settings:
             turn_timeout=_int(raw.get("turn_timeout"), base.turn_timeout, 30, 3600),
             whiteboard_limit=_int(raw.get("whiteboard_limit"), base.whiteboard_limit, 500, 100000),
             keep_backups=_int(raw.get("keep_backups"), base.keep_backups, 1, 100),
+            theme=_choice(raw.get("theme"), THEMES, base.theme),
+            text_size=_choice(raw.get("text_size"), TEXT_SIZES, base.text_size),
             user=user,
             members=_valid_members(raw.get("members")) or base.members,
         )

@@ -2,19 +2,31 @@
 :root {
   --bg: #f3f1ec; --panel: #fbfaf7; --card: #ffffff; --line: #e4e0d7;
   --ink: #24231f; --sub: #77736a; --faint: #a8a398;
-  --me: #3b5b8c; --me-ink: #ffffff;
+  --me: #3b5b8c; --me-ink: #ffffff;     /* 你的气泡:底色与文字色,由设置覆盖 */
+  --accent: #3b5b8c;                    /* 强调色:链接、轮到你了、输入框描边 */
   --ok: #2f8f6b; --warn: #b4472f; --warn-bg: #fbeae5; --fresh: #fff6d6;
   --shadow: 0 1px 2px rgba(40, 35, 20, .06), 0 4px 14px rgba(40, 35, 20, .05);
   --radius: 12px;
+  color-scheme: light;
 }
+/* 深色:系统是深色且没有强制浅色时生效;或在设置里强制深色。两处的值要保持一致。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #17181a; --panel: #1d1f22; --card: #25282c; --line: #33373c;
     --ink: #e9e7e2; --sub: #9c9a94; --faint: #6d6c68;
-    --me: #4f74ad; --me-ink: #ffffff;
+    --accent: #86a8e0;
     --ok: #55b892; --warn: #e3806a; --warn-bg: #3b2520; --fresh: #3d3620;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 14px rgba(0, 0, 0, .25);
+    color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #17181a; --panel: #1d1f22; --card: #25282c; --line: #33373c;
+  --ink: #e9e7e2; --sub: #9c9a94; --faint: #6d6c68;
+  --accent: #86a8e0;
+  --ok: #55b892; --warn: #e3806a; --warn-bg: #3b2520; --fresh: #3d3620;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 14px rgba(0, 0, 0, .25);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -27,7 +39,7 @@ body {
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; border: 0; background: none; padding: 0; }
 button:disabled { opacity: .4; cursor: default; }
-a { color: var(--me); }
+a { color: var(--accent); }
 [hidden] { display: none !important; }
 
 .app { display: grid; grid-template-columns: 250px minmax(0, 1fr) 310px; height: 100%; }
@@ -42,12 +54,12 @@ a { color: var(--me); }
 .btn.danger { color: var(--warn); border-color: var(--warn); background: none; }
 .btn.wide { width: 100%; padding: 8px; }
 .btn.small { padding: 2px 9px; font-size: 12px; }
-.link { color: var(--me); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
+.link { color: var(--accent); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
 .field {
   width: 100%; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--card); outline: 0;
 }
-.field:focus { border-color: var(--me); }
+.field:focus { border-color: var(--accent); }
 
 .av {
   width: 36px; height: 36px; border-radius: 50%; flex: none; object-fit: cover;
@@ -73,8 +85,9 @@ a { color: var(--me); }
 .item.on { background: var(--card); box-shadow: var(--shadow); }
 .item .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .m { font-size: 12px; color: var(--sub); display: flex; gap: 6px; align-items: center; }
+.item .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
-.dot.user { background: var(--me); }
+.dot.user { background: var(--accent); }
 .dot.running { background: var(--ok); animation: pulse 1.4s infinite; }
 .dot.paused { background: var(--warn); }
 .gear { text-align: left; padding: 8px; color: var(--sub); font-size: 13px; border-radius: 8px; }
@@ -109,6 +122,9 @@ a { color: var(--me); }
 .who b { color: var(--ink); font-weight: 600; }
 .who i { font-style: normal; font-variant-numeric: tabular-nums; }
 .me .who { flex-direction: row-reverse; }
+.copy { font-size: 11.5px; color: var(--faint); padding: 0 6px; border-radius: 5px; visibility: hidden; }
+.msg:hover .copy { visibility: visible; }
+.copy:hover { color: var(--ink); background: var(--line); }
 .bub {
   background: var(--card); border-radius: 4px 14px 14px 14px; padding: 10px 14px;
   box-shadow: var(--shadow); overflow-wrap: anywhere;
@@ -168,10 +184,10 @@ a { color: var(--me); }
 /* ── 输入区 ───────────────────────────────────────────────────────────── */
 .compose { padding: 10px 22px 16px; border-top: 1px solid var(--line); background: var(--panel); }
 .turn { font-size: 12.5px; margin-bottom: 7px; color: var(--sub); display: flex; align-items: center; gap: 10px; min-height: 22px; }
-.turn.you { color: var(--me); font-weight: 600; }
+.turn.you { color: var(--accent); font-weight: 600; }
 .box { border: 1.5px solid var(--line); border-radius: var(--radius); background: var(--card); padding: 8px 10px; }
-.box.you { border-color: var(--me); }
-.box.drop { border-style: dashed; border-color: var(--me); }
+.box.you { border-color: var(--accent); }
+.box.drop { border-style: dashed; border-color: var(--accent); }
 .box textarea { width: 100%; min-height: 60px; max-height: 260px; border: 0; outline: 0; resize: none; background: none; display: block; }
 .thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 8px; }
 .thumb { position: relative; }
@@ -212,6 +228,7 @@ a { color: var(--me); }
 .dialog header { padding: 16px 20px 0; font-size: 15.5px; font-weight: 600; }
 .dialog .content { padding: 12px 20px; overflow-y: auto; }
 .dialog .content p { margin: 0 0 10px; color: var(--sub); }
+.dialog .content p.fine { font-size: 12px; color: var(--faint); margin: 6px 0 0 22px; }
 .dialog footer { padding: 12px 20px 16px; display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
 .dialog footer .problem { margin-right: auto; color: var(--warn); font-size: 12.5px; }
 .zoom { max-width: 92vw; max-height: 92vh; border-radius: 10px; cursor: zoom-out; }
@@ -221,7 +238,7 @@ a { color: var(--me); }
   font-size: 13px; opacity: 0; pointer-events: none; transition: .2s; max-width: 80vw;
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
-.menu { position: absolute; right: 22px; top: 52px; z-index: 10; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 5px; min-width: 150px; }
+.menu { position: fixed; z-index: 25; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 5px; min-width: 150px; }
 .menu button { display: block; width: 100%; text-align: left; padding: 6px 10px; border-radius: 6px; font-size: 13px; }
 .menu button:hover { background: var(--bg); }
 .menu .danger { color: var(--warn); }

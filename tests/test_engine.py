@@ -47,14 +47,16 @@ class EngineCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
-        self.paths = Paths(root, trash=root / "废纸篓")
+        self.paths = Paths(root, trash=root / "废纸篓", downloads=root / "下载")
         self.paths.ensure()
         # 关键隔离:测试绝不向真实 NAS 同步
         self.paths.settings.write_text(json.dumps({
             "nas_sync": True, "nas_mount": str(root / "没挂载的NAS"),
             "nas_dir": str(root / "没挂载的NAS" / "备份")}), encoding="utf-8")
         self.script, self.calls = {}, []
-        self.engine = Engine(self.paths, lambda member: FakeAI(member, self.script, self.calls))
+        self.revealed = []
+        self.engine = Engine(self.paths, lambda member: FakeAI(member, self.script, self.calls),
+                             reveal=self.revealed.append)
 
     def idle(self, sid):
         deadline = time.monotonic() + 5
@@ -209,6 +211,17 @@ class Trouble(EngineCase):
         view = self.idle(sid)
         self.assertEqual((view["phase"], view["error"]), ("paused", "你停止了这一棒。"))
 
+    def test_interrupt_and_add_restarts_the_same_turn(self):
+        self.script["CLAUDE"] = ["BLOCK"]
+        sid = self.engine.create("遮阳棚")
+        self.engine.send(sid, "议题")
+        self.engine.send(sid, "等等,预算只有两千", interrupt=True)
+        view = self.idle(sid)
+        self.assertEqual((view["phase"], view["round"], view["error"]), ("user", 1, ""))
+        self.assertEqual(self.speakers(view), [
+            ("topic", "USER", 0), ("user", "USER", 1), ("ai", "CLAUDE", 1), ("ai", "CODEX", 1)])
+        self.assertIn("等等,预算只有两千", self.calls[1][1].prompt)       # 重说时带上了补充
+
     def test_interjection_while_paused_keeps_round(self):
         self.script["CLAUDE"] = [ProviderError("坏了")]
         sid, _ = self.started()
@@ -286,6 +299,58 @@ class Extras(EngineCase):
         names = {path.name for path in self.paths.trash.iterdir()}
         self.assertEqual(names, {f"{sid}.md", f"{sid}.state.md", f"{sid}_附件", f"{sid}_备份"})
 
+    def test_trash_can_retire_the_nas_copy_instead_of_deleting_it(self):
+        nas = Path(self.tmp.name) / "NAS备份"
+        settings = self.engine.settings_view()
+        settings.update(nas_mount="/", nas_dir=str(nas))
+        self.engine.update_settings(settings)
+        sid, _ = self.started()
+        self.engine.send(sid, "好", finish=True)
+        while self.engine.view(sid)["sync"]["state"] != "synced":
+            time.sleep(0.02)
+        self.assertEqual(self.engine.trash(sid, with_nas=True), {"nas": "moved"})
+        retired = [path for path in nas.iterdir() if path.name.startswith("已删除_")]
+        self.assertEqual(len(retired), 1)
+        self.assertEqual({path.name for path in retired[0].iterdir()}, {f"{sid}.md", f"{sid}.state.md"})
+        self.assertEqual([path.name for path in nas.iterdir()], [retired[0].name])   # 原处已空,没有任何东西被删
+
+    def test_trash_reports_when_nas_is_offline_or_has_no_copy(self):
+        sid, _ = self.started()
+        self.assertEqual(self.engine.trash(sid, with_nas=True), {"nas": "offline"})
+        sid, _ = self.started()
+        self.assertEqual(self.engine.trash(sid), {"nas": "kept"})
+
+    def test_pinned_discussions_come_first(self):
+        first, _ = self.started()
+        time.sleep(0.01)
+        second = self.engine.create("后建的")
+        self.assertEqual([row["id"] for row in self.engine.summaries()], [second, first])
+        self.engine.pin(first, True)
+        rows = self.engine.summaries()
+        self.assertEqual([(row["id"], row["pinned"]) for row in rows], [(first, True), (second, False)])
+        self.engine.pin(first, False)
+        self.assertEqual(self.engine.summaries()[0]["id"], second)
+
+    def test_search_looks_inside_messages(self):
+        self.script["CLAUDE"] = [f"内侧卷帘加隔热膜是性价比最高的组合。\n\n{NO_OPS}"]
+        sid, _ = self.started("要不要装?")
+        other = self.engine.create("隔热膜选购")
+        hits = {hit["id"]: hit["snippet"] for hit in self.engine.search(" 隔热膜 ")}
+        self.assertEqual(hits[other], "")                               # 标题命中
+        self.assertEqual(hits[sid], "内侧卷帘加隔热膜是性价比最高的组合。")
+        self.assertEqual(self.engine.search("不存在的词"), [])
+        self.assertEqual(self.engine.search("   "), [])
+
+    def test_export_is_saved_to_downloads_and_revealed(self):
+        sid, _ = self.started()
+        self.engine.rename(sid, "阳台: 遮阳/方案")
+        path = Path(self.engine.save_export(sid, "<p>导出</p>".encode()))
+        again = Path(self.engine.save_export(sid, b"<p>2</p>"))
+        self.assertEqual((path.parent, path.name), (self.paths.downloads, "阳台_遮阳_方案.html"))
+        self.assertEqual(path.read_text("utf-8"), "<p>导出</p>")
+        self.assertEqual(again.name, "阳台_遮阳_方案 2.html")              # 不覆盖已有文件
+        self.assertEqual(self.revealed, [path, again])
+
     def test_rename_changes_title_not_file(self):
         sid, _ = self.started()
         self.engine.rename(sid, "新名字")
@@ -304,6 +369,9 @@ class Extras(EngineCase):
                         {"id": "LOCAL", "name": "千问", "kind": "ollama", "model": "qwen3"}]})
         settings = self.engine.settings
         self.assertEqual((settings.port, settings.max_rounds, settings.notify), (8765, 12, True))
+        self.assertEqual((settings.theme, settings.text_size), ("auto", "medium"))
+        self.engine.update_settings({"theme": "dark", "text_size": "huge"})
+        self.assertEqual((self.engine.settings.theme, self.engine.settings.text_size), ("dark", "medium"))
         self.assertEqual(settings.proxy, "")
         self.assertEqual([m.id for m in settings.members], ["LOCAL"])
         with self.assertRaises(EngineError):

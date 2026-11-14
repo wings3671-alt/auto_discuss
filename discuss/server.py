@@ -3,10 +3,14 @@
     GET    /                                   界面
     GET    /api/discussions                    讨论列表
     POST   /api/discussions                    新建          {title}
+    GET    /api/search?q=关键词                 在标题和发言里搜索
     GET    /api/discussions/<id>               一场讨论的全部内容
-    POST   /api/discussions/<id>/send          用户发言      {text, finish, extend}
-    POST   /api/discussions/<id>/<动作>         resume / skip / stop / tidy / sync / trash
+    POST   /api/discussions/<id>/send          用户发言      {text, finish, extend, interrupt}
+    POST   /api/discussions/<id>/<动作>         resume / skip / stop / tidy / sync
     POST   /api/discussions/<id>/rename        改标题        {title}
+    POST   /api/discussions/<id>/pin           置顶          {pinned}
+    POST   /api/discussions/<id>/trash         移到废纸篓    {nas}
+    POST   /api/discussions/<id>/export        保存导出的网页(请求体即网页)
     POST   /api/discussions/<id>/attachments   上传附图(请求体即图片)
     GET    /api/discussions/<id>/files/<名>    读附图
     GET    /api/settings      PUT /api/settings
@@ -23,7 +27,7 @@ import queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .engine import Engine, EngineError
 
@@ -32,7 +36,8 @@ log = logging.getLogger("discuss")
 WEB_DIR = Path(__file__).resolve().parent / "web"
 _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 16 * 1024 * 1024
-_SIMPLE_ACTIONS = ("resume", "skip", "stop", "tidy", "trash")
+_MAX_EXPORT_BYTES = 200 * 1024 * 1024
+_SIMPLE_ACTIONS = ("resume", "skip", "stop", "tidy")
 
 
 def serve(engine: Engine, port: int) -> ThreadingHTTPServer:
@@ -99,6 +104,9 @@ def _handler_for(engine: Engine) -> type[BaseHTTPRequestHandler]:
                 return self._json(engine.settings_view())
             if rest == ["events"]:
                 return self._events()
+            if rest == ["search"]:
+                query = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+                return self._json(engine.search(query))
             if len(rest) == 2 and rest[0] == "discussions":
                 return self._json(engine.view(rest[1]))
             if len(rest) == 4 and rest[0] == "discussions" and rest[2] == "files":
@@ -120,9 +128,17 @@ def _handler_for(engine: Engine) -> type[BaseHTTPRequestHandler]:
                 body = self._body()
                 return self._json(engine.send(
                     sid, _text(body, "text"), finish=body.get("finish") is True,
-                    extend=body.get("extend") is True))
+                    extend=body.get("extend") is True,
+                    interrupt=body.get("interrupt") is True))
+            if action == "trash":
+                return self._json(engine.trash(sid, with_nas=self._body().get("nas") is True))
+            if action == "export":
+                return self._json({"path": engine.save_export(
+                    sid, self._raw_body(_MAX_EXPORT_BYTES))})
             if action == "rename":
                 engine.rename(sid, _text(self._body(), "title"))
+            elif action == "pin":
+                engine.pin(sid, self._body().get("pinned") is True)
             elif action == "attachments":
                 name = unquote(self.headers.get("X-Filename") or "图片")
                 return self._json(engine.attach(sid, name, self._upload()))

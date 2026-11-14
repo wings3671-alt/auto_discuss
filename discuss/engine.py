@@ -19,7 +19,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from . import document, prompts, providers, whiteboard
@@ -104,11 +104,17 @@ class Session:
         self.error = ""                   # 上一棒失败的原因,给用户看
 
 
+def _reveal_in_finder(path: Path) -> None:
+    subprocess.run(["/usr/bin/open", "-R", str(path)], check=False)
+
+
 class Engine:
     def __init__(self, paths: Paths,
-                 make_provider: Callable[[Member], Provider] = providers.create) -> None:
+                 make_provider: Callable[[Member], Provider] = providers.create,
+                 reveal: Callable[[Path], None] = _reveal_in_finder) -> None:
         paths.ensure()
         self.paths = paths
+        self._reveal = reveal
         self.settings: Settings = load_settings(paths.settings)
         self.hub = Hub()
         self._make_provider = make_provider
@@ -120,21 +126,36 @@ class Engine:
 
     # ── 查询 ────────────────────────────────────────────────────────────────
     def summaries(self) -> list[dict[str, Any]]:
+        """讨论列表:置顶的在前,其余按最近改动排序。"""
+        pinned = self._pins()
         rows = []
-        for path in self.paths.discussions.glob("*.md"):
-            if not self._is_discussion(path):
-                continue
-            try:
-                session = self._session(path.stem)
-                doc = self._read(session)
-            except (EngineError, OSError, UnicodeError):
-                continue                                    # 读不了的文件不进列表
+        for session, doc in self._documents():
             status = self._status(doc)
             rows.append({
                 "id": session.id, "title": doc.title or session.id,
                 "phase": self._phase(session, status), "round": status.round,
-                "turn": self._name(status.turn), "modified": path.stat().st_mtime})
-        return sorted(rows, key=lambda row: row["modified"], reverse=True)
+                "turn": self._name(status.turn), "pinned": session.id in pinned,
+                "modified": session.path.stat().st_mtime})
+        return sorted(rows, key=lambda row: (row["pinned"], row["modified"]), reverse=True)
+
+    def search(self, query: str) -> list[dict[str, str]]:
+        """在标题和所有发言里找 query(不分大小写)。每场讨论给出第一处命中的上下文;
+        命中在标题里时摘要为空。"""
+        needle = " ".join(query.lower().split())
+        hits = []
+        for session, doc in self._documents() if needle else ():
+            if needle in doc.title.lower():
+                hits.append({"id": session.id, "snippet": ""})
+                continue
+            for message in doc.messages:
+                text = " ".join(message.text.split())
+                position = text.lower().find(needle)
+                if position >= 0:
+                    start = max(0, position - 10)
+                    excerpt = text[start:position + len(needle) + 30]
+                    hits.append({"id": session.id, "snippet": ("…" if start else "") + excerpt})
+                    break
+        return hits
 
     def view(self, sid: str) -> dict[str, Any]:
         session = self._session(sid)
@@ -193,11 +214,15 @@ class Engine:
         self.hub.publish({"type": "list"})
         return stem
 
-    def send(self, sid: str, text: str, finish: bool = False, extend: bool = False
-             ) -> dict[str, Any]:
-        """用户发言。新讨论里它是议题;已收工的讨论里它重新开场;AI 出错暂停时它是插话。"""
+    def send(self, sid: str, text: str, finish: bool = False, extend: bool = False,
+             interrupt: bool = False) -> dict[str, Any]:
+        """用户发言。新讨论里它是议题;已收工的讨论里它重新开场;AI 出错暂停时它是插话。
+
+        interrupt:AI 正在发言时,先打断它,再把这段话作为插话交给它重说这一棒。"""
         session = self._session(sid)
         text = text.strip()
+        if interrupt and text and session.busy and session.job == "turn":
+            self._interrupt(session)
         with session.lock:
             self._require_idle(session)
             raw = session.path.read_text(encoding="utf-8")
@@ -272,6 +297,21 @@ class Engine:
     def stop(self, sid: str) -> None:
         self._session(sid).cancel.set()
 
+    def _interrupt(self, session: Session) -> None:
+        """叫停正在发言的 AI,并等它真的停下来。"""
+        session.cancel.set()
+        deadline = time.monotonic() + 15
+        while session.busy:
+            if time.monotonic() > deadline:
+                raise EngineError("没能停下正在发言的 AI,请稍后再试。", 409)
+            time.sleep(0.05)
+
+    def pin(self, sid: str, pinned: bool) -> None:
+        self._session(sid)
+        others = [item for item in self._pins() if item != sid]
+        write_json(self.paths.pins, [sid, *others] if pinned else others)
+        self.hub.publish({"type": "list"})
+
     def tidy(self, sid: str) -> None:
         session = self._session(sid)
         if self._board(session).is_empty():
@@ -288,8 +328,11 @@ class Engine:
             write_text(session.path, document.with_title(raw, title))
         self._changed(session)
 
-    def trash(self, sid: str) -> None:
-        """把一场讨论连同白板、附件、备份移进废纸篓(可在废纸篓里找回)。"""
+    def trash(self, sid: str, with_nas: bool = False) -> dict[str, str]:
+        """把一场讨论连同白板、附件、备份移进废纸篓(可在废纸篓里找回)。
+
+        with_nas:NAS 上的备份也一起处理——挪进 NAS 的「已删除_日期」文件夹,不直接删。
+        返回的 nas 字段说明 NAS 那一份的去向:kept / moved / none / offline / failed。"""
         session = self._session(sid)
         with session.lock:
             self._require_idle(session)
@@ -303,7 +346,44 @@ class Engine:
                     shutil.move(str(source), str(_free_name(self.paths.trash / name)))
         with self._registry_lock:
             self._sessions.pop(sid, None)
+        with self._sync_lock:
+            records = self._sync_records()
+            if records.pop(sid, None):
+                write_json(self.paths.sync_log, records)
+        if sid in self._pins():
+            write_json(self.paths.pins, [item for item in self._pins() if item != sid])
+        outcome = self._retire_nas_copy(session) if with_nas else "kept"
         self.hub.publish({"type": "list"})
+        return {"nas": outcome}
+
+    def _retire_nas_copy(self, session: Session) -> str:
+        folder = self._nas_folder()
+        if folder is None:
+            return "offline"
+        copies = [folder / path.name
+                  for path in (session.path, session.state_path, session.attachments)]
+        copies = [copy for copy in copies if copy.exists()]
+        if not copies:
+            return "none"
+        try:
+            retired = folder / f"已删除_{datetime.now():%Y-%m-%d}"
+            retired.mkdir(exist_ok=True)
+            for copy in copies:
+                shutil.move(str(copy), str(_free_name(retired / copy.name)))
+        except OSError as err:
+            log.warning("挪动 NAS 上的备份失败:%s", err)
+            return "failed"
+        return "moved"
+
+    def save_export(self, sid: str, html: bytes) -> str:
+        """把界面生成的导出网页存进「下载」文件夹,并在访达里显示它。返回文件路径。"""
+        title = self._read(self._session(sid)).title
+        name = _UNSAFE_NAME_RE.sub("_", title).strip("._")[:60] or sid
+        self.paths.downloads.mkdir(parents=True, exist_ok=True)
+        target = _free_name(self.paths.downloads / f"{name}.html")
+        target.write_bytes(html)
+        self._reveal(target)
+        return str(target)
 
     def attach(self, sid: str, filename: str, data: bytes) -> dict[str, str]:
         """保存一张附图,返回可以插进发言的 Markdown。只收 PNG / JPG。"""
@@ -374,11 +454,10 @@ class Engine:
 
     def _sync_one(self, session: Session) -> str:
         """返回 synced / pending;没开同步返回空串。"""
-        cfg = self.settings
-        if not (cfg.nas_sync and cfg.nas_mount and cfg.nas_dir):
+        if not self.settings.nas_sync:
             return ""
-        target = Path(cfg.nas_dir)
-        if not os.path.ismount(cfg.nas_mount) or Path(cfg.nas_mount) not in target.parents:
+        target = self._nas_folder()
+        if target is None:
             return "pending"
         sources = [str(path) for path in (session.path, session.state_path, session.attachments)
                    if path.exists()]
@@ -392,6 +471,14 @@ class Engine:
         if done.returncode != 0:
             log.warning("同步到 NAS 失败:%s", done.stderr.strip()[-300:])
         return "synced" if done.returncode == 0 else "pending"
+
+    def _nas_folder(self) -> Path | None:
+        """NAS 上的备份文件夹;没配置、或 NAS 没挂载时返回 None(绝不在挂载点之外建目录)。"""
+        cfg = self.settings
+        if not (cfg.nas_mount and cfg.nas_dir) or not os.path.ismount(cfg.nas_mount):
+            return None
+        folder = Path(cfg.nas_dir)
+        return folder if Path(cfg.nas_mount) in folder.parents else None
 
     def _sync_records(self) -> dict[str, dict[str, str]]:
         try:
@@ -549,6 +636,24 @@ class Engine:
         return (path.is_file() and name.endswith(".md") and not name.endswith(".state.md")
                 and not name.startswith(".") and ".backup." not in name
                 and name != self.paths.rules.name)
+
+    def _documents(self) -> Iterator[tuple[Session, Document]]:
+        """逐个给出所有讨论;读不了的文件跳过。"""
+        for path in self.paths.discussions.glob("*.md"):
+            if not self._is_discussion(path):
+                continue
+            try:
+                session = self._session(path.stem)
+                yield session, self._read(session)
+            except (EngineError, OSError, UnicodeError):
+                continue
+
+    def _pins(self) -> list[str]:
+        try:
+            data = json.loads(self.paths.pins.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [item for item in data if isinstance(item, str)] if isinstance(data, list) else []
 
     def _session(self, sid: str) -> Session:
         path = self.paths.discussions / f"{sid}.md"

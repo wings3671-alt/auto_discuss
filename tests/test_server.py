@@ -21,10 +21,10 @@ class ServerCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        paths = Paths(root, trash=root / "废纸篓")
+        paths = Paths(root, trash=root / "废纸篓", downloads=root / "下载")
         paths.ensure()
         paths.settings.write_text(json.dumps({"nas_sync": False}), encoding="utf-8")
-        self.engine = Engine(paths, lambda member: FakeAI(member, {}, []))
+        self.engine = Engine(paths, lambda member: FakeAI(member, {}, []), reveal=lambda path: None)
         self.server = serve(self.engine, 0)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -34,7 +34,7 @@ class ServerCase(unittest.TestCase):
 
     def call(self, method, path, body=None, raw=None, headers=None):
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
-        request = urllib.request.Request(self.base + urllib.parse.quote(path), data=data,
+        request = urllib.request.Request(self.base + urllib.parse.quote(path, safe="/?=&"), data=data,
                                          method=method, headers=headers or {})
         try:
             with self.opener.open(request, timeout=5) as response:
@@ -73,7 +73,14 @@ class ServerCase(unittest.TestCase):
         self.assertEqual([m["kind"] for m in view["messages"]], ["topic", "ai", "ai"])
         self.assertEqual(self.json("GET", "/api/discussions")[1][0]["phase"], "user")
         self.assertEqual(self.json("POST", f"/api/discussions/{sid}/rename", {"title": "新名"})[0], 200)
-        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/trash")[0], 200)
+        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/pin", {"pinned": True})[0], 200)
+        self.assertTrue(self.json("GET", "/api/discussions")[1][0]["pinned"])
+        (hit,) = self.json("GET", "/api/search?q=要不要")[1]
+        self.assertEqual(hit["id"], sid)
+        self.assertTrue(hit["snippet"].startswith("要不要装?"))
+        status, saved = self.json("POST", f"/api/discussions/{sid}/export", raw="<p>页</p>".encode())
+        self.assertEqual((status, Path(saved["path"]).name), (200, "新名.html"))
+        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/trash", {"nas": False}), (200, {"nas": "kept"}))
         self.assertEqual(self.json("GET", "/api/discussions")[1], [])
 
     def test_errors_are_readable_json(self):
