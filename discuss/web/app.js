@@ -51,6 +51,15 @@ const api = {
 const tellApp = (message) => window.webkit?.messageHandlers?.app?.postMessage(message);
 
 // ── 小工具 ────────────────────────────────────────────────────────────────
+// 1 → 一、12 → 十二、25 → 二十五;用在"第几回"上
+function chineseNumber(n) {
+  const digits = "零一二三四五六七八九";
+  if (n < 10) return digits[n];
+  if (n < 20) return `十${n % 10 ? digits[n % 10] : ""}`;
+  if (n < 100) return `${digits[Math.floor(n / 10)]}十${n % 10 ? digits[n % 10] : ""}`;
+  return String(n);
+}
+
 const tokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -72,7 +81,8 @@ function avatar(person, small = false) {
   const css = `av${small ? " small" : ""}`;
   if (person?.image) return `<img class="${css}" src="/api/avatars/${enc(person.image)}" alt="">`;
   const text = person?.avatar || (person?.name || "?").slice(0, 1);
-  return `<span class="${css}" style="background:${esc(person?.color || "#888888")}">${esc(text)}</span>`;
+  const color = person?.color || "#888888";
+  return `<span class="${css}" style="background:${esc(color)};color:${readableOn(color)}">${esc(text)}</span>`;
 }
 
 async function copyText(text) {
@@ -235,7 +245,7 @@ function messageHtml(message, index) {
   const tags = [];
   if (message.note) tags.push(`<span class="tag${message.note.startsWith("⚠") ? " bad" : ""}">${esc(message.note)}</span>`);
   if (message.ctx) tags.push(`<span class="tag">上下文 ${tokens(message.ctx)} · 输出 ${tokens(message.out)}</span>`);
-  return `<div class="msg${mine ? " me" : ""}">${avatar(who)}<div class="body">
+  return `<div class="msg${mine ? " me" : ""}" style="--who:${esc(who.color)}">${avatar(who)}<div class="body">
     <div class="who"><b>${esc(who.name)}</b><span>${esc(label)}</span>
       <button class="copy" data-act="copy" data-index="${index}">复制</button></div>
     ${bubble}${cards}${tags.length ? `<div class="foot">${tags.join("")}</div>` : ""}</div></div>`;
@@ -262,7 +272,7 @@ function liveHtml() {
   const body = live.text
     ? `<div class="bub md">${renderMarkdown(live.text).html}</div>`
     : `<div class="bub"><span class="dots"><span></span><span></span><span></span></span></div>`;
-  return `<div class="msg" id="live">${avatar(person(live.speaker))}<div class="body">
+  return `<div class="msg" id="live" style="--who:${esc(person(live.speaker).color)}">${avatar(person(live.speaker))}<div class="body">
     <div class="who"><b>${esc(nameOf(live.speaker))}</b><span>${esc(doing)} · 已用 <i id="elapsed" data-started="${live.started}">${elapsed(live.started)}</i></span></div>
     ${body}</div></div>`;
 }
@@ -274,7 +284,7 @@ function troubleHtml() {
   const detail = stopped ? `<b>已停止。</b>${esc(name)} 这一棒没有说完,已经说过的内容都还在。`
     : view.error ? `<b>这一棒没成功。</b>已经说过的内容都还在。<pre>${esc(view.error)}</pre>`
     : `<b>讨论停在这里。</b>轮到 ${esc(name)} 发言,还没说。`;
-  return `<div class="msg trouble">${avatar(person(view.turn))}<div class="body">
+  return `<div class="msg trouble" style="--who:${esc(person(view.turn).color)}">${avatar(person(view.turn))}<div class="body">
     <div class="who"><b>${esc(name)}</b></div>
     <div class="bub">${detail}<div class="actions">
       <button class="btn primary" data-act="resume">${view.error ? "重试这一棒" : `让 ${esc(name)} 发言`}</button>
@@ -287,7 +297,7 @@ function messagesHtml(view) {
   view.messages.forEach((message, index) => {
     if (message.round > round) {
       round = message.round;
-      parts.push(`<div class="round">— 第 ${round} 轮 —</div>`);
+      parts.push(`<div class="round"><i>◆</i>第${chineseNumber(round)}回<i>◆</i></div>`);
     }
     parts.push(messageHtml(message, index));
   });
@@ -347,9 +357,9 @@ function updateLive(live) {
 const COMPOSER = {
   new: { turn: () => "写下议题,发送后 AI 们开始发言", you: true, placeholder: "你想讨论什么?写得越具体,讨论越到点。", primary: "开始讨论" },
   user: { turn: (view) => `轮到你了 · 第 ${view.round} 轮`, you: true, placeholder: "写下你的意见…", primary: "发送,进入下一轮", finish: true },
-  running: { turn: (view) => `${nameOf(view.live?.speaker || view.turn)} ${view.job === "tidy" ? "正在整理白板" : "正在发言"}。想补充就直接写`, placeholder: "想到要补充的?写在这里,点「打断并补充」,它会带着你的话重说这一棒…", primary: "打断并补充", interrupt: true },
+  running: { turn: (view) => `${nameOf(view.live?.speaker || view.turn)} ${view.job === "tidy" ? "正在整理白板" : "正在发言"}。想补充就直接写`, placeholder: "想插一句?写在这里,点「中途插话」,它会带着你的话重说这一棒…", primary: "中途插话", interrupt: true },
   paused: { turn: () => "讨论暂停了。可以补充一句再继续,也可以直接点上面的按钮", placeholder: "补充说明(可选)…", primary: "发送并继续", finish: true },
-  done: { turn: () => "已收工。想继续聊,直接写下新想法", placeholder: "又想到新的了?写在这里,重新开场…", primary: "重新开场" },
+  done: { turn: () => "已收工。想接着聊,直接写下新想法", placeholder: "又想到新的了?写在这里,接着聊…", primary: "继续讨论" },
 };
 
 function buildComposer() {
@@ -621,7 +631,6 @@ const exportDiscussion = guarded(async (id) => {
     chatHtml: messagesHtml(view),
     boardHtml: boardHtml(view),
     css: await (await fetch("/web/app.css")).text(),
-    rootStyle: document.documentElement.getAttribute("style") || "",
   });
   const { path } = await api.exportFile(view.id, html);
   toast(`已导出到「下载」文件夹:${path.split("/").pop()}`);
@@ -631,11 +640,9 @@ const exportDiscussion = guarded(async (id) => {
 const ZOOM = { small: 0.9, medium: 1, large: 1.12, xlarge: 1.25 };
 
 function applyAppearance() {
-  const { theme, text_size: size, user } = state.settings;
+  const { theme, text_size: size } = state.settings;
   const root = document.documentElement;
   if (theme === "auto") root.removeAttribute("data-theme"); else root.dataset.theme = theme;
-  root.style.setProperty("--me", user.color);              // 你的气泡颜色 = 你头像的底色
-  root.style.setProperty("--me-ink", readableOn(user.color));
   const zoom = ZOOM[size] ?? 1;
   if (window.webkit?.messageHandlers?.app) tellApp({ type: "appearance", theme, zoom });
   else document.body.style.zoom = zoom;                     // 在普通浏览器里的替代做法
@@ -698,7 +705,7 @@ function openSettings() {
         ${[["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([value, label]) => `<option value="${value}"${draft.theme === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>
       <div class="line"><span>字号</span><select class="field num" data-setting="text_size" style="width:170px">
         ${[["small", "小"], ["medium", "标准"], ["large", "大"], ["xlarge", "特大"]].map(([value, label]) => `<option value="${value}"${draft.text_size === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>
-      <div class="tip">你的气泡颜色就是你头像的底色,在上面成员那一栏里改。</div>
+      <div class="tip">每个人发言笺的颜色就是他头像的底色,在上面成员那一栏里改。</div>
 
       <h4>网络</h4>
       <div class="line"><span>AI 联网走代理</span>

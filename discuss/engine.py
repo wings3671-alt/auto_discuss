@@ -216,7 +216,7 @@ class Engine:
 
     def send(self, sid: str, text: str, finish: bool = False, extend: bool = False,
              interrupt: bool = False) -> dict[str, Any]:
-        """用户发言。新讨论里它是议题;已收工的讨论里它重新开场;AI 出错暂停时它是插话。
+        """用户发言。新讨论里它是议题;已收工的讨论里它接着往下聊;AI 出错暂停时它是插话。
 
         interrupt:AI 正在发言时,先打断它,再把这段话作为插话交给它重说这一棒。"""
         session = self._session(sid)
