@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>讨论群 · 界面样稿 v1</title>
+<style>
+  :root {
+    --bg: #f3f1ec; --panel: #fbfaf7; --card: #ffffff; --line: #e4e0d7;
+    --ink: #24231f; --sub: #77736a; --faint: #a8a398;
+    --claude: #c9822b; --claude-bg: #fbf1e1;
+    --codex: #2f8f6b; --codex-bg: #e6f4ee;
+    --me: #3b5b8c; --me-ink: #ffffff;
+    --warn: #b4472f; --warn-bg: #fbeae5;
+    --new: #fff6d6;
+    --shadow: 0 1px 2px rgba(40,35,20,.06), 0 4px 14px rgba(40,35,20,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --panel: #1d1f22; --card: #25282c; --line: #33373c;
+      --ink: #e9e7e2; --sub: #9c9a94; --faint: #6d6c68;
+      --claude: #e0a04e; --claude-bg: #3a2f1e;
+      --codex: #55b892; --codex-bg: #1e3329;
+      --me: #4f74ad; --me-ink: #ffffff;
+      --warn: #e3806a; --warn-bg: #3b2520;
+      --new: #3d3620;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.65 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
+
+  /* 样稿说明条 */
+  .demo {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 6px 16px; font-size: 12px; color: var(--sub);
+    border-bottom: 1px dashed var(--line); background: var(--panel);
+  }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { padding: 3px 12px; font-size: 12px; color: var(--sub); }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.on { background: var(--ink); color: var(--bg); }
+
+  .app { display: grid; grid-template-columns: 250px minmax(0,1fr) 310px; min-height: 0; }
+  .col { min-height: 0; overflow-y: auto; }
+
+  /* 左栏:讨论列表 */
+  .left { background: var(--panel); border-right: 1px solid var(--line); padding: 14px 10px; }
+  .brand { font-weight: 600; font-size: 15px; padding: 2px 8px 12px; letter-spacing: .02em; }
+  .new {
+    width: 100%; padding: 8px; border-radius: 9px; background: var(--ink); color: var(--bg);
+    font-weight: 500; margin-bottom: 10px;
+  }
+  .search {
+    width: 100%; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); color: var(--ink); font: inherit; font-size: 13px; margin-bottom: 12px;
+  }
+  .grp { font-size: 11px; color: var(--faint); padding: 8px 8px 4px; letter-spacing: .08em; }
+  .item { padding: 8px 10px; border-radius: 9px; cursor: default; }
+  .item.on { background: var(--card); box-shadow: var(--shadow); }
+  .item .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .m { font-size: 12px; color: var(--sub); display: flex; gap: 6px; align-items: center; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.wait { background: var(--me); } .dot.run { background: var(--codex); } .dot.err { background: var(--warn); }
+
+  /* 中栏:对话 */
+  .mid { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  .head {
+    display: flex; align-items: center; gap: 14px; padding: 12px 22px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .head h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .head .sub { font-size: 12px; color: var(--sub); }
+  .order { margin-left: auto; display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--sub); }
+  .chip { padding: 1px 9px; border-radius: 99px; border: 1px solid var(--line); background: var(--card); }
+  .chip.now { border-color: var(--ink); color: var(--ink); font-weight: 600; }
+
+  .chat { padding: 18px 22px 8px; }
+  .round { text-align: center; font-size: 12px; color: var(--faint); margin: 14px 0; letter-spacing: .1em; }
+  .msg { display: flex; gap: 10px; margin: 14px 0; max-width: 780px; }
+  .msg.me { flex-direction: row-reverse; margin-left: auto; }
+  .av {
+    width: 36px; height: 36px; border-radius: 50%; flex: none; display: grid; place-items: center;
+    font-weight: 600; font-size: 14px; color: #fff;
+  }
+  .av.c { background: var(--claude); } .av.x { background: var(--codex); } .av.w { background: var(--me); }
+  .av.g { background: transparent; border: 1.5px dashed var(--faint); color: var(--faint); }
+  .body { min-width: 0; }
+  .who { font-size: 12px; color: var(--sub); margin-bottom: 3px; }
+  .who b { color: var(--ink); font-weight: 600; margin-right: 6px; }
+  .me .who { text-align: right; }
+  .bub {
+    background: var(--card); border-radius: 4px 14px 14px 14px; padding: 10px 14px;
+    box-shadow: var(--shadow); overflow-wrap: anywhere;
+  }
+  .bub p { margin: 0 0 8px; } .bub p:last-child { margin: 0; }
+  .me .bub { background: var(--me); color: var(--me-ink); border-radius: 14px 4px 14px 14px; }
+  .foot { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 11.5px; color: var(--sub); }
+  .tag { padding: 1px 8px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); }
+  .link {
+    display: flex; gap: 10px; align-items: center; margin-top: 8px; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  }
+  .link .ic { width: 30px; height: 30px; border-radius: 7px; background: var(--codex-bg); color: var(--codex); display: grid; place-items: center; flex: none; }
+  .link .lt { font-weight: 500; font-size: 13px; } .link .lu { font-size: 11.5px; color: var(--sub); }
+  .pic {
+    margin-top: 8px; width: 210px; height: 130px; border-radius: 10px;
+    background: linear-gradient(160deg, #9db7c9 0 45%, #d8c7a6 45% 62%, #7f9a78 62%);
+    display: grid; place-items: end start; padding: 6px 8px; font-size: 11px; color: #fff;
+  }
+
+  /* 三种状态:轮到你 / AI 发言中 / 出错 */
+  .typing, .error, .stopbar { display: none; }
+  body[data-s="run"] .typing, body[data-s="run"] .stopbar { display: flex; }
+  body[data-s="err"] .error { display: flex; }
+  .dots span { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--codex); animation: b 1.2s infinite; }
+  .dots span:nth-child(2) { animation-delay: .2s; } .dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes b { 0%, 60%, 100% { opacity: .25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+  @media (prefers-reduced-motion: reduce) { .dots span { animation: none; } }
+  .error .bub { background: var(--warn-bg); border: 1px solid var(--warn); box-shadow: none; }
+  .error .bub b { color: var(--warn); }
+  .btn { padding: 4px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); font-size: 13px; }
+  .btn.pri { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .btn.red { color: var(--warn); border-color: var(--warn); }
+
+  /* 输入区 */
+  .compose { padding: 10px 22px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+  .turn { font-size: 12.5px; margin-bottom: 7px; color: var(--sub); display: flex; align-items: center; gap: 10px; }
+  body[data-s="you"] .turn { color: var(--me); font-weight: 600; }
+  .box { border: 1.5px solid var(--line); border-radius: 12px; background: var(--card); padding: 8px 10px; }
+  body[data-s="you"] .box { border-color: var(--me); }
+  .box textarea {
+    width: 100%; min-height: 62px; border: 0; outline: 0; resize: none; background: none;
+    color: var(--ink); font: inherit;
+  }
+  .bar { display: flex; align-items: center; gap: 8px; }
+  .bar .sp { flex: 1; font-size: 11.5px; color: var(--faint); }
+  body:not([data-s="you"]) .bar .pri, body:not([data-s="you"]) .bar .red { opacity: .35; pointer-events: none; }
+
+  /* 右栏:白板 + 成员 */
+  .right { background: var(--panel); border-left: 1px solid var(--line); padding: 14px; }
+  .sec { font-size: 11px; color: var(--faint); letter-spacing: .08em; margin: 16px 0 7px; }
+  .sec:first-child { margin-top: 2px; }
+  .meter { background: var(--card); border-radius: 10px; padding: 9px 11px; box-shadow: var(--shadow); font-size: 12px; color: var(--sub); }
+  .meter .v { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .track { height: 5px; border-radius: 9px; background: var(--line); margin: 6px 0 4px; overflow: hidden; }
+  .track i { display: block; height: 100%; width: 27%; background: var(--codex); border-radius: 9px; }
+  .wb { background: var(--card); border-radius: 10px; padding: 4px 11px; box-shadow: var(--shadow); }
+  .wb h3 { font-size: 12.5px; margin: 9px 0 3px; font-weight: 600; }
+  .wb ul { list-style: none; margin: 0 0 8px; padding: 0; }
+  .wb li { font-size: 12.5px; padding: 3px 5px; border-radius: 6px; display: flex; gap: 6px; }
+  .wb li.nw { background: var(--new); }
+  .wb .id { color: var(--faint); font-variant-numeric: tabular-nums; flex: none; font-size: 11.5px; padding-top: 1px; }
+  .mem { display: flex; align-items: center; gap: 9px; padding: 6px 4px; }
+  .mem .av { width: 28px; height: 28px; font-size: 12px; }
+  .mem .n { font-weight: 500; font-size: 13px; line-height: 1.3; }
+  .mem .h { font-size: 11.5px; color: var(--sub); }
+  .mem .e { margin-left: auto; font-size: 12px; color: var(--faint); }
+
+  @media (max-width: 980px) { .app { grid-template-columns: minmax(0,1fr); } .left, .right { display: none; } }
+</style>
+</head>
+<body data-s="you">
+
+<div class="demo">
+  <span>静态样稿 · 全部是假数据 · 按钮没有实际功能</span>
+  <span>切换状态看效果:</span>
+  <span class="seg" id="seg">
+    <button data-s="you" class="on">轮到你</button>
+    <button data-s="run">AI 发言中</button>
+    <button data-s="err">出错了</button>
+  </span>
+</div>
+
+<div class="app">
+
+  <!-- 左:讨论列表 -->
+  <aside class="col left">
+    <div class="brand">讨论群</div>
+    <button class="new">＋ 新建讨论</button>
+    <input class="search" placeholder="搜索讨论…">
+    <div class="grp">进行中</div>
+    <div class="item on"><div class="t">阳台要不要装遮阳棚</div><div class="m"><span class="dot wait"></span>第 2 轮 · 等你发言</div></div>
+    <div class="item"><div class="t">旧相机卖还是留</div><div class="m"><span class="dot err"></span>第 4 轮 · 出错待处理</div></div>
+    <div class="grp">已收工</div>
+    <div class="item"><div class="t">周末短途去哪</div><div class="m"><span class="dot"></span>6 轮 · 11 月 9 日</div></div>
+    <div class="item"><div class="t">书房灯光方案</div><div class="m"><span class="dot"></span>3 轮 · 10 月 28 日</div></div>
+    <div class="item"><div class="t">要不要换显示器</div><div class="m"><span class="dot"></span>5 轮 · 10 月 12 日</div></div>
+  </aside>
+
+  <!-- 中:对话 -->
+  <main class="mid">
+    <div class="head">
+      <div>
+        <h1>阳台要不要装遮阳棚</h1>
+        <div class="sub">11 月 14 日开始 · 第 2 轮 / 上限 12 轮</div>
+      </div>
+      <div class="order">
+        发言顺序
+        <span class="chip" id="c1">Claude</span>›
+        <span class="chip" id="c2">Codex</span>›
+        <span class="chip now" id="c3">我</span>
+      </div>
+    </div>
+
+    <div class="col chat">
+      <div class="round">— 第 1 轮 —</div>
+
+      <div class="msg me">
+        <div class="av w">W</div>
+        <div class="body">
+          <div class="who">16:02 <b style="margin:0 0 0 6px">Wings</b></div>
+          <div class="bub">
+            <p>西晒太厉害,下午阳台没法待。想装遮阳棚,但怕挡光、怕大风。附一张现在的样子。</p>
+            <div class="pic">阳台现状.jpg</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg">
+        <div class="av c">C</div>
+        <div class="body">
+          <div class="who"><b>Claude</b>16:04</div>
+          <div class="bub">
+            <p>先别急着选棚子。从照片看,西晒主要来自下午三点后的低角度阳光,顶棚对低角度光几乎没用,真正管用的是<b>侧面垂直遮挡</b>。</p>
+            <p>我的不同思路:先用一百块以内的遮阳帘试两周,确认有效再上固定结构。</p>
+          </div>
+          <div class="foot"><span class="tag">白板:新增 1 条结论、2 个待解决问题</span><span class="tag">读入 6.1k · 输出 0.9k</span></div>
+        </div>
+      </div>
+
+      <div class="msg">
+        <div class="av x">X</div>
+        <div class="body">
+          <div class="who"><b>Codex</b>16:07</div>
+          <div class="bub">
+            <p>同意垂直遮挡的判断,但不同意"先试两周"——现在是冬天,西晒最弱,试不出夏天的效果。</p>
+            <p>更该先确认的是物业是否允许外立面加装,这一条能直接否掉一半方案。</p>
+            <div class="link"><div class="ic">↗</div><div><div class="lt">不同朝向的遮阳方式对比</div><div class="lu">example.org/shading-guide</div></div></div>
+          </div>
+          <div class="foot"><span class="tag">白板:新增 1 条约束,修订 Q1</span><span class="tag">读入 7.4k · 输出 1.0k</span></div>
+        </div>
+      </div>
+
+      <div class="round">— 第 2 轮 —</div>
+
+      <div class="msg me">
+        <div class="av w">W</div>
+        <div class="body">
+          <div class="who">16:15 <b style="margin:0 0 0 6px">Wings</b></div>
+          <div class="bub"><p>问过物业了:外立面不能动,阳台内侧随便装。预算两千以内。</p></div>
+        </div>
+      </div>
+
+      <div class="msg">
+        <div class="av c">C</div>
+        <div class="body">
+          <div class="who"><b>Claude</b>16:18</div>
+          <div class="bub"><p>那外挂式全部出局,剩下内侧卷帘和蜂巢帘两条路。卷帘便宜、抗风无压力;蜂巢帘隔热更好但贵一倍。两千预算下我倾向卷帘加隔热膜的组合。</p></div>
+          <div class="foot"><span class="tag">白板:否决 1 个方案,新增 1 条结论</span><span class="tag">读入 6.8k · 输出 0.7k</span></div>
+        </div>
+      </div>
+
+      <!-- 状态:AI 发言中 -->
+      <div class="msg typing">
+        <div class="av x">X</div>
+        <div class="body">
+          <div class="who"><b>Codex</b>正在发言 · 已用 1 分 12 秒</div>
+          <div class="bub"><span class="dots"><span></span><span></span><span></span></span></div>
+        </div>
+      </div>
+
+      <!-- 状态:出错 -->
+      <div class="msg error">
+        <div class="av x">X</div>
+        <div class="body">
+          <div class="who"><b>Codex</b>16:21</div>
+          <div class="bub">
+            <p><b>这一棒没成功:</b>Codex 的登录已过期。讨论内容没有丢,已停在这一棒。</p>
+            <p>请先在终端重新登录 Codex,再点"重试"。</p>
+            <div class="bar" style="margin-top:8px"><button class="btn pri">重试这一棒</button><button class="btn">跳过 Codex</button><button class="btn">查看日志</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="compose">
+      <div class="turn">
+        <span id="turnText">轮到你了 · 第 2 轮</span>
+        <span class="stopbar"><button class="btn red">停止这一棒</button></span>
+      </div>
+      <div class="box">
+        <textarea placeholder="写下你的意见…(可以直接粘贴文字;图片可拖进来)"></textarea>
+        <div class="bar">
+          <button class="btn">＋ 图片</button>
+          <span class="sp">只接受 PNG / JPG,其他格式会被拒收</span>
+          <button class="btn red">收工</button>
+          <button class="btn pri">发送,进入下一轮</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 右:白板与成员 -->
+  <aside class="col right">
+    <div class="sec">上下文</div>
+    <div class="meter">
+      白板长度 <span class="v">1.6k</span> / 建议上限 6k
+      <div class="track"><i></i></div>
+      状态正常。超过上限时会提示你是否让 AI 整理白板。
+    </div>
+
+    <div class="sec">白板</div>
+    <div class="wb">
+      <h3>已达成的结论</h3>
+      <ul>
+        <li><span class="id">C1</span>西晒来自低角度光,要靠垂直遮挡</li>
+        <li class="nw"><span class="id">C2</span>只在阳台内侧安装</li>
+      </ul>
+      <h3>待解决的问题</h3>
+      <ul>
+        <li><span class="id">Q1</span>卷帘和蜂巢帘,隔热差多少</li>
+        <li><span class="id">Q2</span>大风天内侧帘是否需要固定</li>
+      </ul>
+      <h3>已否决的方案</h3>
+      <ul><li class="nw"><span class="id">R1</span>外挂伸缩棚:物业不允许动外立面</li></ul>
+      <h3>关键约束</h3>
+      <ul>
+        <li><span class="id">K1</span>外立面不能改动</li>
+        <li><span class="id">K2</span>预算两千以内</li>
+      </ul>
+    </div>
+
+    <div class="sec">成员</div>
+    <div class="mem"><div class="av c">C</div><div><div class="n">Claude</div><div class="h">订阅 · Claude Code</div></div><span class="e">编辑</span></div>
+    <div class="mem"><div class="av x">X</div><div><div class="n">Codex</div><div class="h">订阅 · Codex</div></div><span class="e">编辑</span></div>
+    <div class="mem"><div class="av w">W</div><div><div class="n">Wings</div><div class="h">决策者 · 压轴发言</div></div><span class="e">编辑</span></div>
+    <div class="mem"><div class="av g">＋</div><div><div class="n" style="color:var(--sub)">添加成员</div><div class="h">本地模型,或其他有订阅版命令行的模型</div></div></div>
+  </aside>
+</div>
+
+<script>
+  const text = { you: "轮到你了 · 第 2 轮", run: "Codex 正在发言,你可以先打草稿", err: "讨论已暂停,等待处理" };
+  const now = { you: "c3", run: "c2", err: "c2" };
+  document.getElementById("seg").addEventListener("click", e => {
+    const s = e.target.dataset.s; if (!s) return;
+    document.body.dataset.s = s;
+    document.querySelectorAll("#seg button").forEach(b => b.classList.toggle("on", b === e.target));
+    document.getElementById("turnText").textContent = text[s];
+    ["c1", "c2", "c3"].forEach(id => document.getElementById(id).classList.toggle("now", id === now[s]));
+    const chat = document.querySelector(".chat"); chat.scrollTop = chat.scrollHeight;
+  });
+</script>
+</body>
+</html>
