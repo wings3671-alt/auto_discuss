@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>讨论群</title>
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="left">
+    <div class="brand">讨论群</div>
+    <button class="btn primary wide" id="newButton">＋ 新建讨论</button>
+    <input class="search" id="search" type="search" placeholder="搜索讨论…" autocomplete="off">
+    <nav class="list" id="list"></nav>
+    <button class="gear" id="settingsButton">⚙ 设置</button>
+  </aside>
+
+  <main class="mid" id="mid">
+    <header class="head" id="head"></header>
+    <section class="chat" id="chat"></section>
+    <footer class="compose" id="compose"></footer>
+  </main>
+
+  <aside class="right" id="side"></aside>
+
+</div>
+<div id="overlay"></div>
+<div id="toast" role="status"></div>
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>

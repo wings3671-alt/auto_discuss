@@ -1,0 +1,707 @@
+"""调度:轮到谁、调用谁、把什么写进文档。
+
+程序是讨论文档与白板的唯一执笔人。AI 只输出文字,碰不到任何文件。
+每场讨论同一时间只有一个后台任务(一棒发言,或一次白板整理)。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import re
+import shutil
+import socket
+import subprocess
+import threading
+import time
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import urlparse
+
+from . import document, prompts, providers, whiteboard
+from .config import (AI_KINDS, USER_ID, Member, Paths, Settings, load_settings,
+                     save_settings, write_json, write_text)
+from .document import Document, Phase, Status
+from .providers import Provider, ProviderError, Reply, Request, TurnCancelled
+
+log = logging.getLogger("discuss")
+
+_EXTEND_BY = 6                      # 到达轮数上限后,一次延长几轮
+_MAX_IMAGE_BYTES = 15 * 1024 * 1024
+_IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg"}
+_PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+_EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
+               "/usr/bin", "/bin"]
+_UNSAFE_NAME_RE = re.compile(r'[\\/:*?"<>|\s\x00-\x1f]+')
+_UNSAFE_IMAGE_NAME_RE = re.compile(r"[^\w\-]+")
+_PHASE_VIEW = {Phase.NEW: "new", Phase.ACTIVE: "paused", Phase.USER: "user", Phase.DONE: "done"}
+
+
+class EngineError(Exception):
+    """用户的操作做不了。消息是写给用户看的中文;code 是对应的 HTTP 状态码。"""
+
+    def __init__(self, message: str, code: int = 400) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+# ── 事件广播:界面靠它知道"有变化了" ─────────────────────────────────────────
+class Hub:
+    def __init__(self) -> None:
+        self._listeners: set[queue.Queue[dict[str, Any]]] = set()
+        self._lock = threading.Lock()
+
+    def subscribe(self) -> queue.Queue[dict[str, Any]]:
+        listener: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)
+        with self._lock:
+            self._listeners.add(listener)
+        return listener
+
+    def unsubscribe(self, listener: queue.Queue[dict[str, Any]]) -> None:
+        with self._lock:
+            self._listeners.discard(listener)
+
+    def publish(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener.put_nowait(event)
+            except queue.Full:
+                pass                      # 界面太久没读:丢掉,它重连后会整体刷新
+
+
+# ── 一场讨论的运行时状态(不落盘)────────────────────────────────────────────
+@dataclass
+class Live:
+    """正在发言的那一棒:谁、已经说了什么、此刻在做什么。"""
+
+    speaker: str
+    text: str = ""
+    status: str = ""
+    started: float = 0.0
+
+
+class Session:
+    def __init__(self, sid: str, path: Path) -> None:
+        self.id = sid
+        self.path = path
+        self.state_path = path.with_name(f"{sid}.state.md")
+        self.attachments = path.with_name(f"{sid}_附件")
+        self.lock = threading.RLock()
+        self.cancel = threading.Event()
+        self.busy = False
+        self.job = ""                     # turn(发言)/ tidy(整理白板)
+        self.live: Live | None = None
+        self.error = ""                   # 上一棒失败的原因,给用户看
+
+
+class Engine:
+    def __init__(self, paths: Paths,
+                 make_provider: Callable[[Member], Provider] = providers.create) -> None:
+        paths.ensure()
+        self.paths = paths
+        self.settings: Settings = load_settings(paths.settings)
+        self.hub = Hub()
+        self._make_provider = make_provider
+        self._sessions: dict[str, Session] = {}
+        self._registry_lock = threading.Lock()
+        self._sync_lock = threading.Lock()
+        self._health: dict[str, dict[str, Any]] = {}
+        self._last_live_event = 0.0
+
+    # ── 查询 ────────────────────────────────────────────────────────────────
+    def summaries(self) -> list[dict[str, Any]]:
+        rows = []
+        for path in self.paths.discussions.glob("*.md"):
+            if not self._is_discussion(path):
+                continue
+            try:
+                session = self._session(path.stem)
+                doc = self._read(session)
+            except (EngineError, OSError, UnicodeError):
+                continue                                    # 读不了的文件不进列表
+            status = self._status(doc)
+            rows.append({
+                "id": session.id, "title": doc.title or session.id,
+                "phase": self._phase(session, status), "round": status.round,
+                "turn": self._name(status.turn), "modified": path.stat().st_mtime})
+        return sorted(rows, key=lambda row: row["modified"], reverse=True)
+
+    def view(self, sid: str) -> dict[str, Any]:
+        session = self._session(sid)
+        doc = self._read(session)
+        status = self._status(doc)
+        board, board_problem = self._board_or_blank(session)
+        speakers = {m.speaker: m.name for m in doc.messages if m.kind == "ai"}
+        people = {USER_ID: asdict(self.settings.user)}
+        for member_id in dict.fromkeys([*status.members, *speakers]):
+            people[member_id] = self._person(member_id, speakers.get(member_id, ""))
+        return {
+            "id": sid, "title": doc.title or sid,
+            "phase": self._phase(session, status),
+            "round": status.round, "max_rounds": status.max_rounds, "turn": status.turn,
+            "members": status.members, "people": people,
+            "messages": [asdict(message) for message in doc.messages],
+            "draft": doc.draft,
+            "board": {
+                "sections": [{"key": key, "title": title,
+                              "items": [asdict(item) for item in board.sections[key]]}
+                             for key, _, title in whiteboard.SECTIONS],
+                "tokens": whiteboard.estimate_tokens(whiteboard.render(board)),
+                "limit": self.settings.whiteboard_limit, "problem": board_problem},
+            "job": session.job, "error": session.error,
+            "live": asdict(session.live) if session.live else None,
+            "health": {member_id: self._health[member_id]
+                       for member_id in status.members if member_id in self._health},
+            "sync": self._sync_state(sid),
+            "attachments": session.attachments.name,
+        }
+
+    def settings_view(self) -> dict[str, Any]:
+        return {**self.settings.to_dict(), "rules": self._rules(), "kinds": list(AI_KINDS),
+                "proxy_alive": _reachable(self.settings.proxy),
+                "nas_online": bool(self.settings.nas_mount)
+                and os.path.ismount(self.settings.nas_mount)}
+
+    def attachment(self, sid: str, name: str) -> Path:
+        return _existing_child(self._session(sid).attachments, name)
+
+    def avatar(self, name: str) -> Path:
+        return _existing_child(self.paths.avatars, name)
+
+    # ── 用户的操作 ──────────────────────────────────────────────────────────
+    def create(self, title: str) -> str:
+        title = " ".join(title.split())[:60] or "未命名讨论"
+        members = self.settings.enabled_ids()
+        if not members:
+            raise EngineError("至少要启用一个 AI 成员(设置 → 成员)。")
+        stem = (_UNSAFE_NAME_RE.sub("_", title).strip("._")[:40] or "讨论") \
+            + datetime.now().strftime("_%m%d")
+        if (self.paths.discussions / f"{stem}.md").exists():
+            stem += datetime.now().strftime("-%H%M%S")
+        status = Status(max_rounds=self.settings.max_rounds, members=members, updated=_now())
+        write_text(self.paths.discussions / f"{stem}.md", document.new_document(title, status))
+        self.hub.publish({"type": "list"})
+        return stem
+
+    def send(self, sid: str, text: str, finish: bool = False, extend: bool = False
+             ) -> dict[str, Any]:
+        """用户发言。新讨论里它是议题;已收工的讨论里它重新开场;AI 出错暂停时它是插话。"""
+        session = self._session(sid)
+        text = text.strip()
+        with session.lock:
+            self._require_idle(session)
+            raw = session.path.read_text(encoding="utf-8")
+            doc = document.parse(raw)
+            status = self._status(doc)
+            first = status.members[0] if status.members else ""
+            waiting = status.phase == Phase.USER          # 旧版此时在文末留有占位段
+            if not first:
+                raise EngineError("这场讨论没有 AI 成员(设置 → 成员)。")
+
+            if status.phase == Phase.NEW:
+                if finish or not (text or doc.topic):
+                    raise EngineError("先写下你想讨论的问题。")
+                if text:
+                    raw = document.with_topic(raw, text)
+                status = replace(status, phase=Phase.ACTIVE, round=1, turn=first)
+            elif finish:
+                if text or waiting:
+                    raw = document.with_user_message(raw, status.round, text or "收工。",
+                                                     _now(), into_placeholder=waiting)
+                status = replace(status, phase=Phase.DONE, turn=USER_ID)
+            elif not text:
+                raise EngineError("写点什么再发送。")
+            elif status.phase == Phase.ACTIVE:              # 暂停中的插话:不换轮,原地继续
+                raw = document.with_user_message(raw, status.round, text, _now())
+            else:                                           # 轮到用户,或重新打开已收工的讨论
+                upcoming = status.round + 1
+                if upcoming > status.max_rounds:
+                    if not extend:
+                        return {"need_extend": True, "max_rounds": status.max_rounds,
+                                "extend_by": _EXTEND_BY}
+                    status = replace(status, max_rounds=status.max_rounds + _EXTEND_BY)
+                target = upcoming if status.phase == Phase.DONE else status.round
+                raw = document.with_user_message(raw, target, text, _now(),
+                                                 into_placeholder=waiting)
+                status = replace(status, phase=Phase.ACTIVE, round=upcoming, turn=first)
+
+            self._backup(session)
+            status = replace(status, updated=_now())
+            write_text(session.path, document.with_status(raw, status))
+            session.error = ""
+
+        if status.phase == Phase.DONE:
+            self.sync_later(sid)
+        self._continue(session, status)
+        return {"ok": True}
+
+    def resume(self, sid: str) -> None:
+        session = self._session(sid)
+        with session.lock:
+            self._require_idle(session)
+            status = self._status(self._read(session))
+            if status.phase != Phase.ACTIVE:
+                raise EngineError("现在没有等着发言的 AI。")
+        self._continue(session, status)
+
+    def skip(self, sid: str) -> None:
+        session = self._session(sid)
+        with session.lock:
+            self._require_idle(session)
+            raw = session.path.read_text(encoding="utf-8")
+            status = self._status(document.parse(raw))
+            if status.phase != Phase.ACTIVE:
+                raise EngineError("现在没有可以跳过的发言。")
+            note = f"⏭ 跳过了 {self._name(status.turn)} 的第 {status.round} 轮发言。"
+            status = _after(status)
+            write_text(session.path, document.with_status(
+                document.with_note(raw, status.round, note, _now()), status))
+            session.error = ""
+        self._continue(session, status)
+
+    def stop(self, sid: str) -> None:
+        self._session(sid).cancel.set()
+
+    def tidy(self, sid: str) -> None:
+        session = self._session(sid)
+        if self._board(session).is_empty():
+            raise EngineError("白板还是空的,不需要整理。")
+        self._start(session, "tidy", self._tidy)
+
+    def rename(self, sid: str, title: str) -> None:
+        title = " ".join(title.split())[:60]
+        if not title:
+            raise EngineError("标题不能为空。")
+        session = self._session(sid)
+        with session.lock:
+            raw = session.path.read_text(encoding="utf-8")
+            write_text(session.path, document.with_title(raw, title))
+        self._changed(session)
+
+    def trash(self, sid: str) -> None:
+        """把一场讨论连同白板、附件、备份移进废纸篓(可在废纸篓里找回)。"""
+        session = self._session(sid)
+        with session.lock:
+            self._require_idle(session)
+            self.paths.trash.mkdir(parents=True, exist_ok=True)
+            moves = [(session.path, session.path.name),
+                     (session.state_path, session.state_path.name),
+                     (session.attachments, session.attachments.name),
+                     (self.paths.backups / sid, f"{sid}_备份")]
+            for source, name in moves:
+                if source.exists():
+                    shutil.move(str(source), str(_free_name(self.paths.trash / name)))
+        with self._registry_lock:
+            self._sessions.pop(sid, None)
+        self.hub.publish({"type": "list"})
+
+    def attach(self, sid: str, filename: str, data: bytes) -> dict[str, str]:
+        """保存一张附图,返回可以插进发言的 Markdown。只收 PNG / JPG。"""
+        session = self._session(sid)
+        extension = _image_type(data)
+        stem = _UNSAFE_IMAGE_NAME_RE.sub("_", Path(filename).stem).strip("_")[:30] or "图片"
+        session.attachments.mkdir(exist_ok=True)
+        target = _free_name(
+            session.attachments / f"{datetime.now():%H%M%S}_{stem}.{extension}")
+        target.write_bytes(data)
+        return {"name": target.name,
+                "markdown": f"![{stem}]({session.attachments.name}/{target.name})"}
+
+    def set_avatar(self, member_id: str, data: bytes) -> str:
+        member = self._member_or_user(member_id)
+        name = f"{member_id}_{datetime.now():%Y%m%d%H%M%S}.{_image_type(data)}"
+        (self.paths.avatars / name).write_bytes(data)
+        member.image = name
+        save_settings(self.paths.settings, self.settings)
+        self.hub.publish({"type": "settings"})
+        return name
+
+    def update_settings(self, raw: Any) -> None:
+        updated = Settings.from_dict(raw)
+        if not updated.enabled_ids():
+            raise EngineError("至少要启用一个 AI 成员。")
+        for member in updated.members:
+            if member.kind == "ollama" and not member.model:
+                raise EngineError(f"本地模型成员「{member.name}」需要填模型名。")
+            if member.kind == "command" and not member.command:
+                raise EngineError(f"命令行成员「{member.name}」需要填命令行。")
+        rules = raw.get("rules") if isinstance(raw, dict) else None
+        if isinstance(rules, str) and rules.strip() and rules.strip() != self._rules().strip():
+            write_text(self.paths.rules, rules.strip() + "\n")
+        save_settings(self.paths.settings, updated)
+        self.settings = updated
+        self.hub.publish({"type": "settings"})
+        self.hub.publish({"type": "list"})
+
+    def shutdown(self) -> None:
+        """退出前:叫停所有正在发言的 AI。"""
+        with self._registry_lock:
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            session.cancel.set()
+        deadline = time.monotonic() + 8
+        while any(session.busy for session in sessions) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+    # ── 同步到 NAS:只加不删;NAS 没挂上就记为待同步,下次补 ────────────────────
+    def sync_later(self, sid: str | None = None) -> None:
+        threading.Thread(target=self._sync_pending, args=(sid,), daemon=True).start()
+
+    def _sync_pending(self, sid: str | None) -> None:
+        with self._sync_lock:
+            records = self._sync_records()
+            targets = [key for key, record in records.items() if record.get("state") == "pending"]
+            for target in dict.fromkeys([sid, *targets] if sid else targets):
+                try:
+                    state = self._sync_one(self._session(target))
+                except EngineError:
+                    records.pop(target, None)              # 讨论已不在:不再惦记
+                    continue
+                if state:
+                    records[target] = {"state": state, "at": _now()}
+                    self.hub.publish({"type": "view", "id": target})
+            write_json(self.paths.sync_log, records)
+
+    def _sync_one(self, session: Session) -> str:
+        """返回 synced / pending;没开同步返回空串。"""
+        cfg = self.settings
+        if not (cfg.nas_sync and cfg.nas_mount and cfg.nas_dir):
+            return ""
+        target = Path(cfg.nas_dir)
+        if not os.path.ismount(cfg.nas_mount) or Path(cfg.nas_mount) not in target.parents:
+            return "pending"
+        sources = [str(path) for path in (session.path, session.state_path, session.attachments)
+                   if path.exists()]
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            done = subprocess.run(["/usr/bin/rsync", "-rt", "--", *sources, f"{target}/"],
+                                  capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.SubprocessError) as err:
+            log.warning("同步到 NAS 失败:%s", err)
+            return "pending"
+        if done.returncode != 0:
+            log.warning("同步到 NAS 失败:%s", done.stderr.strip()[-300:])
+        return "synced" if done.returncode == 0 else "pending"
+
+    def _sync_records(self) -> dict[str, dict[str, str]]:
+        try:
+            data = json.loads(self.paths.sync_log.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {key: value for key, value in data.items() if isinstance(value, dict)} \
+            if isinstance(data, dict) else {}
+
+    def _sync_state(self, sid: str) -> dict[str, str]:
+        if not self.settings.nas_sync:
+            return {"state": "off", "at": ""}
+        return self._sync_records().get(sid) or {"state": "none", "at": ""}
+
+    # ── 后台任务 ────────────────────────────────────────────────────────────
+    def _continue(self, session: Session, status: Status) -> None:
+        if status.phase == Phase.ACTIVE:
+            self._start(session, "turn", self._relay)
+        else:
+            self._changed(session)
+
+    def _start(self, session: Session, job: str, work: Callable[[Session], None]) -> None:
+        with session.lock:
+            self._require_idle(session)
+            session.busy, session.job, session.error = True, job, ""
+            session.cancel = threading.Event()
+        threading.Thread(target=self._work, args=(session, work), daemon=True).start()
+        self._changed(session)
+
+    def _work(self, session: Session, work: Callable[[Session], None]) -> None:
+        try:
+            work(session)
+        except TurnCancelled:
+            session.error = "你停止了这一棒。"
+        except (ProviderError, EngineError) as err:
+            session.error = str(err)
+            log.warning("[%s] %s", session.id, err)
+        except Exception as err:                            # noqa: BLE001 - 不让后台线程无声死掉
+            session.error = f"程序内部出错:{type(err).__name__}: {err}"
+            log.exception("[%s] 未预期的错误", session.id)
+        finally:
+            session.busy, session.job, session.live = False, "", None
+            self._changed(session)
+
+    def _relay(self, session: Session) -> None:
+        """AI 们依次发言,直到轮到用户。"""
+        while True:
+            doc = self._read(session)
+            status = self._status(doc)
+            if status.phase != Phase.ACTIVE:
+                return
+            member = self.settings.member(status.turn)
+            if member is None:
+                raise ProviderError(f"成员 {status.turn} 已不在成员名单里。"
+                                    "可以点「跳过」,或到设置里把它加回来。")
+            self._ai_turn(session, member, doc, status)
+
+    def _ai_turn(self, session: Session, member: Member, doc: Document, status: Status) -> None:
+        self._backup(session)
+        board = self._board(session)
+        provider = self._make_provider(member)
+        attached = self._images(session, doc)
+        context = prompts.TurnContext(
+            speaker=member.name, round=status.round, topic=doc.topic, rules=self._rules(),
+            board=whiteboard.render(board), doc_path=str(session.path),
+            others=self._latest_from_others(doc, status, member.id),
+            user_name=self.settings.user.name,
+            user_text=next((m.text for m in reversed(doc.messages) if m.kind == "user"), ""),
+            image_paths=[str(path) for path in attached],
+            can_see_images=provider.sees_images)
+        reply, ops, problem = self._ask(session, member, provider, prompts.turn(context),
+                                        board, attached if provider.sees_images else [])
+        body, _ = whiteboard.split_reply(reply.text)
+        if not body:
+            raise ProviderError(f"{member.name} 没有输出任何内容。")
+        note = f"⚠ 白板未更新:{problem}" if problem else f"📋 {whiteboard.summarize(ops)}"
+
+        with session.lock:
+            raw = session.path.read_text(encoding="utf-8")
+            raw = document.with_ai_message(raw, member.id, member.name, status.round, body,
+                                           note, _now(), reply.ctx, reply.out)
+            write_text(session.path, document.with_status(raw, _after(status)))
+            whiteboard.apply(board, ops, f"r{status.round}-{member.id.lower()}")
+            write_text(session.state_path, whiteboard.render(board))
+        self._health[member.id] = {"ctx": reply.ctx, "window": reply.window,
+                                   "expires": reply.expires}
+        session.live = None
+        self._changed(session)
+
+    def _tidy(self, session: Session) -> None:
+        status = self._status(self._read(session))
+        member = next((m for m in map(self.settings.member, status.members) if m), None)
+        if member is None:
+            raise ProviderError("这场讨论的成员都已不在名单里,没有人能整理白板。")
+        self._backup(session)
+        board = self._board(session)
+        before = whiteboard.estimate_tokens(whiteboard.render(board))
+        _, ops, problem = self._ask(session, member, self._make_provider(member),
+                                    prompts.tidy(whiteboard.render(board)), board, [],
+                                    status="正在整理白板")
+        if problem:
+            raise ProviderError(f"{member.name} 给出的整理指令不合格:{problem}")
+        whiteboard.apply(board, ops, f"r{status.round}-{member.id.lower()}")
+        after = whiteboard.estimate_tokens(whiteboard.render(board))
+        note = (f"🧹 {member.name} 整理了白板({whiteboard.summarize(ops)}),"
+                f"长度从约 {before} 降到约 {after} token。")
+        with session.lock:
+            write_text(session.state_path, whiteboard.render(board))
+            raw = session.path.read_text(encoding="utf-8")
+            write_text(session.path, document.with_note(raw, status.round, note, _now()))
+
+    def _ask(self, session: Session, member: Member, provider: Provider, prompt: str,
+             board: whiteboard.Board, images: list[Path], status: str = ""
+             ) -> tuple[Reply, list[whiteboard.Op], str]:
+        """调用 AI 并取出合格的 STATE_OPS;不合格重试一次。返回(回复, 指令, 问题说明)。"""
+        problem = ""
+        reply = Reply("")
+        for attempt in (1, 2):
+            session.live = Live(member.id, status=status, started=time.time())
+            self._publish_live(session, force=True)
+            reply = provider.run(Request(
+                prompt=prompt if attempt == 1 else prompts.retry(prompt, problem),
+                workdir=self.paths.discussions, env=self._environment(),
+                timeout=self.settings.turn_timeout, cancel=session.cancel, images=images,
+                on_text=lambda text: self._on_live(session, text=text),
+                on_status=lambda text: self._on_live(session, status=text)))
+            try:
+                return reply, whiteboard.read_ops(reply.text, board), ""
+            except whiteboard.BoardError as err:
+                problem = str(err)
+                log.warning("[%s] %s 的 STATE_OPS 不合格(第 %d 次):%s",
+                            session.id, member.name, attempt, problem)
+        return reply, [], problem
+
+    def _on_live(self, session: Session, text: str | None = None,
+                 status: str | None = None) -> None:
+        live = session.live
+        if live is None:
+            return
+        if text is not None:
+            live.text = whiteboard.visible_part(text)
+        if status is not None:
+            live.status = status
+        self._publish_live(session)
+
+    def _publish_live(self, session: Session, force: bool = False) -> None:
+        now = time.monotonic()
+        if session.live and (force or now - self._last_live_event > 0.1):
+            self._last_live_event = now
+            self.hub.publish({"type": "live", "id": session.id, "live": asdict(session.live)})
+
+    # ── 小工具 ──────────────────────────────────────────────────────────────
+    def _is_discussion(self, path: Path) -> bool:
+        name = path.name
+        return (path.is_file() and name.endswith(".md") and not name.endswith(".state.md")
+                and not name.startswith(".") and ".backup." not in name
+                and name != self.paths.rules.name)
+
+    def _session(self, sid: str) -> Session:
+        path = self.paths.discussions / f"{sid}.md"
+        if "/" in sid or "\\" in sid or not self._is_discussion(path):
+            raise EngineError("找不到这场讨论。", 404)
+        with self._registry_lock:
+            return self._sessions.setdefault(sid, Session(sid, path))
+
+    def _read(self, session: Session) -> Document:
+        return document.parse(session.path.read_text(encoding="utf-8"))
+
+    def _status(self, doc: Document) -> Status:
+        status = doc.status or Status(max_rounds=self.settings.max_rounds)
+        return status if status.members else replace(status, members=self.settings.enabled_ids())
+
+    @staticmethod
+    def _phase(session: Session, status: Status) -> str:
+        return "running" if session.busy else _PHASE_VIEW[status.phase]
+
+    def _require_idle(self, session: Session) -> None:
+        if session.busy:
+            raise EngineError("AI 正在发言。等它说完,或先点「停止」。", 409)
+
+    def _member_or_user(self, member_id: str) -> Member:
+        member = self.settings.user if member_id == USER_ID else self.settings.member(member_id)
+        if member is None:
+            raise EngineError("找不到这个成员。", 404)
+        return member
+
+    def _name(self, member_id: str) -> str:
+        if member_id == USER_ID:
+            return self.settings.user.name
+        member = self.settings.member(member_id)
+        return member.name if member else member_id
+
+    def _person(self, member_id: str, last_name: str) -> dict[str, Any]:
+        """界面显示一个成员所需的信息;成员已被删掉时用它当年的名字兜底。"""
+        member = self.settings.member(member_id)
+        if member:
+            return {**asdict(member), "missing": False}
+        name = last_name or member_id
+        return {**asdict(Member(member_id, name, "", name[:1], "#8a8a8a")), "missing": True}
+
+    def _rules(self) -> str:
+        try:
+            return self.paths.rules.read_text(encoding="utf-8")
+        except OSError:
+            return prompts.DEFAULT_RULES
+
+    def _board(self, session: Session) -> whiteboard.Board:
+        if not session.state_path.exists():
+            return whiteboard.Board()
+        try:
+            return whiteboard.parse(session.state_path.read_text(encoding="utf-8"))
+        except whiteboard.BoardError as err:
+            raise EngineError(f"{err}:{session.state_path.name}。请从备份恢复后再继续。", 500) from err
+
+    def _board_or_blank(self, session: Session) -> tuple[whiteboard.Board, str]:
+        try:
+            return self._board(session), ""
+        except EngineError as err:
+            return whiteboard.Board(), str(err)
+
+    def _latest_from_others(self, doc: Document, status: Status, speaker: str
+                            ) -> list[tuple[str, str]]:
+        latest = {m.speaker: m for m in doc.messages if m.kind == "ai"}
+        return [(self._name(member_id), latest[member_id].text)
+                for member_id in status.members if member_id != speaker and member_id in latest]
+
+    def _images(self, session: Session, doc: Document) -> list[Path]:
+        """用户最近一次发言(还没发过言则是议题)里引用的、确实存在的附图。"""
+        source = next((m.text for m in reversed(doc.messages) if m.kind in ("user", "topic")), "")
+        found = []
+        for relative in document.image_paths(source):
+            path = (self.paths.discussions / relative).resolve()
+            if path.parent == session.attachments.resolve() and path.is_file():
+                found.append(path)
+        return found
+
+    def _backup(self, session: Session) -> None:
+        """改动前留一份回滚点,每场讨论只保留最近若干份。"""
+        folder = self.paths.backups / session.id
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(session.path, folder / f"{stamp}.md")
+        if session.state_path.exists():
+            shutil.copy2(session.state_path, folder / f"{stamp}.state.md")
+        stamps = sorted({path.name.split(".")[0] for path in folder.iterdir()})
+        for old in stamps[:-self.settings.keep_backups]:
+            for path in folder.glob(f"{old}.*"):
+                path.unlink()
+
+    def _environment(self) -> dict[str, str]:
+        """子进程的环境变量:不带任何 API key(只走订阅);按设置决定走不走代理。"""
+        env = {key: value for key, value in os.environ.items()
+               if not key.upper().endswith("_API_KEY") and key not in _PROXY_KEYS}
+        paths = _EXTRA_PATH + env.get("PATH", "").split(os.pathsep)
+        env["PATH"] = os.pathsep.join(dict.fromkeys(path for path in paths if path))
+        proxy = self.settings.proxy
+        if proxy and _reachable(proxy):
+            env.update({key: proxy for key in _PROXY_KEYS})
+            env["NO_PROXY"] = env["no_proxy"] = "localhost,127.0.0.1"
+        elif proxy:
+            log.warning("代理 %s 没有响应,这次改为直连。", proxy)
+        return env
+
+    def _changed(self, session: Session) -> None:
+        self.hub.publish({"type": "view", "id": session.id})
+        self.hub.publish({"type": "list"})
+
+
+# ── 与具体讨论无关的小函数 ──────────────────────────────────────────────────
+def _after(status: Status) -> Status:
+    """这一棒结束后轮到谁:下一个 AI;AI 都说完了就轮到用户。"""
+    order = status.members
+    position = order.index(status.turn) if status.turn in order else len(order) - 1
+    if position + 1 < len(order):
+        return replace(status, turn=order[position + 1], updated=_now())
+    return replace(status, phase=Phase.USER, turn=USER_ID, updated=_now())
+
+
+def _image_type(data: bytes) -> str:
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise EngineError("图片太大了(上限 15 MB)。", 413)
+    for magic, extension in _IMAGE_TYPES.items():
+        if data.startswith(magic):
+            return extension
+    raise EngineError("暂不支持这种文件。目前只接受 PNG 和 JPG 图片。", 415)
+
+
+def _free_name(path: Path) -> Path:
+    """path 已被占用时,在文件名后加序号,直到找到一个空位。"""
+    candidate, number = path, 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem} {number}{path.suffix}")
+        number += 1
+    return candidate
+
+
+def _existing_child(folder: Path, name: str) -> Path:
+    path = folder / Path(name).name
+    if not path.is_file():
+        raise EngineError("找不到这个文件。", 404)
+    return path
+
+
+def _reachable(proxy: str) -> bool:
+    """代理地址上是否有程序在接听。"""
+    parsed = urlparse(proxy)
+    if not parsed.hostname or not parsed.port:
+        return False
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=0.3):
+            return True
+    except OSError:
+        return False
