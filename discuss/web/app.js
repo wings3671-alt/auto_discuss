@@ -357,7 +357,7 @@ function updateLive(live) {
 const COMPOSER = {
   new: { turn: () => "写下议题,发送后 AI 们开始发言", you: true, placeholder: "你想讨论什么?写得越具体,讨论越到点。", primary: "开始讨论" },
   user: { turn: (view) => `轮到你了 · 第 ${view.round} 轮`, you: true, placeholder: "写下你的意见…", primary: "发送,进入下一轮", finish: true },
-  running: { turn: (view) => `${nameOf(view.live?.speaker || view.turn)} ${view.job === "tidy" ? "正在整理白板" : "正在发言"}。想补充就直接写`, placeholder: "想插一句?写在这里,点「中途插话」,它会带着你的话重说这一棒…", primary: "中途插话", interrupt: true },
+  running: { turn: (view) => `${nameOf(view.live?.speaker || view.turn)} ${view.job === "tidy" ? "正在整理白板" : "正在发言"}。想补充就直接写`, placeholder: "想插一句?写在这里,点「插入发言」,它会带着你的话重说这一棒…", primary: "插入发言", interrupt: true },
   paused: { turn: () => "讨论暂停了。可以补充一句再继续,也可以直接点上面的按钮", placeholder: "补充说明(可选)…", primary: "发送并继续", finish: true },
   done: { turn: () => "已收工。想接着聊,直接写下新想法", placeholder: "又想到新的了?写在这里,接着聊…", primary: "继续讨论" },
 };
