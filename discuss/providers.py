@@ -26,7 +26,9 @@ from typing import Any, Callable, Protocol
 
 from .config import Member
 
-_CLAUDE_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"     # 只读文件 + 联网,不能写、不能跑命令
+_CLAUDE_TALK_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"      # 发言:只读文件 + 联网,不能写、不能跑命令
+_CLAUDE_HANDS_ON_TOOLS = _CLAUDE_TALK_TOOLS + ",Edit,Write,Bash"   # 动手:再加上改文件、跑命令
+_CODEX_THREAD_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 _OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 _LOGIN_WORDS = ("login", "log in", "401", "unauthor", "authenticat", "credential", "expired")
 _THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.S)
@@ -52,6 +54,8 @@ class Request:
     timeout: int
     cancel: threading.Event
     images: list[Path] = field(default_factory=list)
+    hands_on: bool = False                        # 这一棒被派了活:允许改文件、跑命令
+    protected: list[Path] = field(default_factory=list)   # 动手时也不许写的文件夹
     on_text: Callable[[str], None] = _ignore      # 已输出的全文(不是增量)
     on_status: Callable[[str], None] = _ignore    # 此刻在做什么,如"正在联网搜索"
 
@@ -67,6 +71,7 @@ class Reply:
 
 class Provider(Protocol):
     sees_images: bool
+    assignable: bool     # 能不能被派活(动手改文件、跑命令);不能的只发言
 
     def run(self, request: Request) -> Reply: ...
 
@@ -170,20 +175,29 @@ def _with_login_hint(message: str, hint: str) -> str:
 # ── Claude Code ─────────────────────────────────────────────────────────────
 class Claude:
     sees_images = True
+    assignable = True
     _LOGIN_HINT = "看起来是登录问题:请打开终端运行 claude,输入 /login 重新登录后再点重试。"
     _TOOL_STATUS = {"Read": "正在查看文件", "Glob": "正在查找文件", "Grep": "正在检索内容",
-                    "WebSearch": "正在联网搜索", "WebFetch": "正在打开网页"}
+                    "WebSearch": "正在联网搜索", "WebFetch": "正在打开网页",
+                    "Edit": "正在修改文件", "Write": "正在写文件", "Bash": "正在执行命令"}
 
     def __init__(self, member: Member) -> None:
         self.model = member.model
 
-    def run(self, request: Request) -> Reply:
+    def command(self, request: Request) -> list[str]:
+        """命令行。这一棒能做什么全在这里定:发言只给只读工具;被派活才加上改文件、跑命令。"""
+        tools = _CLAUDE_HANDS_ON_TOOLS if request.hands_on else _CLAUDE_TALK_TOOLS
         cmd = [_find("claude", "~/.local/bin/claude", request.env), "-p",
                "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                "--strict-mcp-config",                    # 不加载用户的 MCP:省 token,也碰不到别的软件
-               "--tools", _CLAUDE_TOOLS, "--allowedTools", _CLAUDE_TOOLS]
+               "--tools", tools, "--allowedTools", tools]
+        if request.protected:                            # Edit(//绝对路径/**) 对所有改文件的工具都生效
+            cmd += ["--disallowedTools", *[f"Edit(/{folder}/**)" for folder in request.protected]]
         if self.model:
             cmd += ["--model", self.model]
+        return cmd
+
+    def run(self, request: Request) -> Reply:
         # 从 Claude Code 会话里启动时,要去掉会话变量,否则它以为自己被嵌套而空跑
         env = {key: value for key, value in request.env.items()
                if not key.startswith("CLAUDE") and key != "AI_AGENT"}
@@ -214,7 +228,7 @@ class Claude:
                     live += str(delta.get("text") or "")
                     request.on_text(live)
 
-        code, stderr = _run_process(cmd, request, request.prompt, on_line, env)
+        code, stderr = _run_process(self.command(request), request, request.prompt, on_line, env)
         if not final:
             raise _failure("Claude", code, stderr, self._LOGIN_HINT)
         if final.get("is_error"):
@@ -243,6 +257,7 @@ class Claude:
 # ── Codex ───────────────────────────────────────────────────────────────────
 class Codex:
     sees_images = True
+    assignable = False
     _LOGIN_HINT = "看起来是登录问题:请打开终端运行 codex login 重新登录后再点重试。"
     _ITEM_STATUS = {"reasoning": "正在思考", "command_execution": "正在查看文件",
                     "web_search": "正在联网搜索", "mcp_tool_call": "正在使用工具"}
@@ -262,15 +277,17 @@ class Codex:
         for image in request.images:
             cmd += ["-i", str(image)]
 
-        text, problem = "", ""
+        text, problem, thread = "", "", ""
         usage: dict[str, Any] = {}
 
         def on_line(line: str) -> None:
-            nonlocal text, problem, usage
+            nonlocal text, problem, thread, usage
             event = _json_line(line)
             kind = event.get("type")
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
-            if kind == "item.completed" and item.get("type") == "agent_message":
+            if kind == "thread.started":
+                thread = str(event.get("thread_id") or "")
+            elif kind == "item.completed" and item.get("type") == "agent_message":
                 text = str(item.get("text") or "")
                 request.on_text(text)
             elif kind in ("item.started", "item.completed"):
@@ -289,13 +306,40 @@ class Codex:
             raise ProviderError(_with_login_hint(f"Codex 报错:{problem}", self._LOGIN_HINT))
         if code != 0 or not text:
             raise _failure("Codex", code, stderr, self._LOGIN_HINT)
-        return Reply(text=text, ctx=_num(usage, "input_tokens"),
-                     out=_num(usage, "output_tokens"))
+        ctx, window = _codex_context(thread, request.env)
+        return Reply(text=text, ctx=ctx, out=_num(usage, "output_tokens"), window=window)
+
+
+def _codex_context(thread: str, env: dict[str, str]) -> tuple[int, int]:
+    """(一棒里最大那一步的上下文长度, 模型的上下文上限)。
+
+    codex 的 --json 输出只给一棒内各步的累计值,比真实占用大得多;每一步的真实长度
+    记在它自己保存的会话记录里,按会话编号去找。找不到就是 (0, 0):界面不显示这个数,
+    不拿累计值充数。"""
+    if not _CODEX_THREAD_RE.match(thread):
+        return 0, 0
+    home = Path(env.get("CODEX_HOME") or Path.home() / ".codex")
+    ctx = window = 0
+    for record in home.glob(f"sessions/*/*/*/rollout-*-{thread}.jsonl"):
+        try:
+            lines = record.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            payload = _json_line(line).get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                continue
+            info = payload.get("info")
+            step = info.get("last_token_usage") if isinstance(info, dict) else None
+            ctx = max(ctx, _num(step, "input_tokens"))
+            window = max(window, _num(info, "model_context_window"))
+    return ctx, window
 
 
 # ── 本地模型(Ollama)────────────────────────────────────────────────────────
 class Ollama:
     sees_images = False
+    assignable = False
 
     def __init__(self, member: Member) -> None:
         self.model = member.model
@@ -344,6 +388,7 @@ class Ollama:
 # ── 任意命令行工具:提示词从标准输入进,回复从标准输出出 ───────────────────────
 class Command:
     sees_images = False
+    assignable = False
 
     def __init__(self, member: Member) -> None:
         self.command = member.command

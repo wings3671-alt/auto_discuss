@@ -83,6 +83,14 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.json("POST", f"/api/discussions/{sid}/trash", {"nas": False}), (200, {"nas": "kept"}))
         self.assertEqual(self.json("GET", "/api/discussions")[1], [])
 
+    def test_assignee_is_passed_through(self):
+        sid = self.json("POST", "/api/discussions", {"title": "x"})[1]["id"]
+        status, answer = self.json("POST", f"/api/discussions/{sid}/send",
+                                   {"text": "干活", "assignee": "CODEX"})
+        self.assertEqual((status, answer), (400, {"error": "Codex 只能发言,不能被派活。"}))
+        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/send",
+                                   {"text": "干活", "assignee": "CLAUDE"}), (200, {"ok": True}))
+
     def test_errors_are_readable_json(self):
         self.assertEqual(self.json("GET", "/api/discussions/不存在"), (404, {"error": "找不到这场讨论。"}))
         self.assertEqual(self.json("POST", "/api/discussions", {"title": 5})[0], 400)

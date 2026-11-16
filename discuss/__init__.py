@@ -7,8 +7,8 @@
     whiteboard  状态白板(STATE.md)与 STATE_OPS 指令
     prompts     给 AI 的提示词
     providers   各家 AI 的调用方式(Claude / Codex / Ollama / 任意命令行)
-    engine      调度:轮到谁、调用谁、写入什么
+    engine      调度:轮到谁、调用谁、写入什么;这一回派活给谁
     server      本机网页服务(界面通过它读写)
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"

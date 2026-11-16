@@ -172,6 +172,17 @@ class Write(unittest.TestCase):
         self.assertEqual((note.kind, note.text), ("note", "⏭ 跳过了 Codex 的第 1 轮发言。"))
         self.assertEqual(doc.draft, "")
 
+    def test_assignment_roundtrip(self):
+        self.assertNotIn("assignee", self.text)                    # 没派活时,状态块和旧版一样
+        assigned = Status(Phase.ACTIVE, 2, "CLAUDE", 12, ["CLAUDE", "CODEX"], "t", assignee="CLAUDE")
+        text = document.with_status(self.text, assigned)
+        text = document.with_ai_message(text, "CLAUDE", "Claude", 2, "改好了。", "📋 x", "t", 1, 1,
+                                        hands_on=True)
+        text = document.with_ai_message(text, "CODEX", "Codex", 2, "我看过了。", "📋 x", "t", 1, 1)
+        doc = document.parse(text)
+        self.assertEqual(doc.status, assigned)
+        self.assertEqual([m.hands_on for m in doc.messages], [True, False])
+
     def test_new_format_keeps_a_line_that_says_over(self):
         text = document.with_user_message(self.text, 1, "game over\nover", "t")
         self.assertEqual(document.parse(text).messages[-1].text, "game over\nover")

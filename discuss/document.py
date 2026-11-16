@@ -3,13 +3,13 @@
 文档既是存档也是唯一的数据来源,格式与旧的终端版完全兼容:
 
     # 标题
-    <!-- AUTO_DISCUSS ... -->          状态块:轮到谁、第几轮
+    <!-- AUTO_DISCUSS ... -->          状态块:轮到谁、第几轮、这一回派活给谁
     ## 话题 1
     议题正文
     ---
     <!-- TURN round=1 speaker=CLAUDE time=... ctx=... out=... -->
     ### 🟡 Claude · 第 1 轮
-    AI 发言
+    AI 发言(锚点里带 hands_on=1 的,是被派活、有动手权限的那一棒)
     > 📋 白板更新摘要
     ---
     <!-- USER_TURN_START round=1 v=2 time=... -->
@@ -66,6 +66,7 @@ class Status:
     max_rounds: int = 12
     members: list[str] = field(default_factory=list)
     updated: str = ""
+    assignee: str = ""                  # 这一回被派活的成员编号;只讨论、没派活时为空
 
     def render(self) -> str:
         return "\n".join([
@@ -75,6 +76,7 @@ class Status:
             f"turn: {self.turn}",
             f"max_rounds: {self.max_rounds}",
             f"members: {','.join(self.members)}",
+            *([f"assignee: {self.assignee}"] if self.assignee else []),
             f"last_updated: {self.updated}",
             "-->",
         ])
@@ -91,6 +93,7 @@ class Message:
     ctx: int = 0         # 这次调用的上下文长度(token)
     out: int = 0         # 输出长度(token)
     note: str = ""       # 白板更新摘要
+    hands_on: bool = False   # 这条 AI 发言是被派活的那一棒:有动手权限,不只是发表意见
 
 
 @dataclass
@@ -187,6 +190,7 @@ def _parse_status(text: str) -> Status | None:
         max_rounds=max(1, _to_int(raw.get("max_rounds"), 12)),
         members=members,
         updated=raw.get("last_updated", ""),
+        assignee=raw.get("assignee", "").upper(),
     )
 
 
@@ -213,7 +217,8 @@ def _ai_message(attrs: dict[str, str], round_no: int, body: str) -> Message:
     return Message(
         "ai", attrs.get("speaker", "").upper(), round_no, "\n".join(lines).strip(),
         name=name, time=attrs.get("time", ""),
-        ctx=_to_int(attrs.get("ctx")), out=_to_int(attrs.get("out")), note=note)
+        ctx=_to_int(attrs.get("ctx")), out=_to_int(attrs.get("out")), note=note,
+        hands_on=attrs.get("hands_on") == "1")
 
 
 def _strip_quote(body: str) -> str:
@@ -272,9 +277,9 @@ def with_topic(text: str, topic: str) -> str:
 
 
 def with_ai_message(text: str, speaker: str, name: str, round_no: int, body: str,
-                    note: str, time: str, ctx: int, out: int) -> str:
+                    note: str, time: str, ctx: int, out: int, hands_on: bool = False) -> str:
     block = (f"<!-- TURN round={round_no} speaker={speaker} time={time} "
-             f"ctx={ctx} out={out} -->\n"
+             f"ctx={ctx} out={out}{' hands_on=1' if hands_on else ''} -->\n"
              f"### {dot_of(speaker)} {name} · 第 {round_no} 轮\n\n"
              f"{_safe(body)}\n\n> {note}")
     return _append(text, block)

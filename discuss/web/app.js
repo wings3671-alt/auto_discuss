@@ -176,7 +176,7 @@ const confirmDialog = (title, text, label, run, kind = "primary") => dialog({
 // ── 列表 ──────────────────────────────────────────────────────────────────
 const LIST_TEXT = {
   new: () => "还没写议题",
-  running: (row) => `${row.turn} 正在发言`,
+  running: (row) => `${row.turn} ${row.hands_on ? "正在干活" : "正在发言"}`,
   user: (row) => `第 ${row.round} 轮 · 等你发言`,
   paused: (row) => `第 ${row.round} 轮 · 停在 ${row.turn}`,
 };
@@ -224,7 +224,7 @@ function renderHead() {
   const status = { new: "还没开始", done: "已收工" }[view.phase] ?? `第 ${view.round} 轮 / 上限 ${view.max_rounds} 轮`;
   const speaking = view.phase === "running" || view.phase === "paused" ? view.turn : (view.phase === "user" ? "USER" : "");
   const chips = [...view.members, "USER"].map((id) =>
-    `<span class="chip${id === speaking ? " now" : ""}">${esc(id === "USER" ? "我" : nameOf(id))}</span>`).join("›");
+    `<span class="chip${id === speaking ? " now" : ""}">${esc(id === "USER" ? "我" : nameOf(id))}${id === view.assignee ? " · 干活" : ""}</span>`).join("›");
   $("head").innerHTML = `
     <div><h1 data-act="rename" title="点击改名">${esc(view.title)}</h1><div class="sub">${esc(status)}</div></div>
     <div class="order">发言顺序 ${chips}</div>
@@ -243,6 +243,7 @@ function messageHtml(message, index) {
   const cards = !mine && links.length
     ? `<div class="cards">${links.slice(0, 4).map(linkCard).join("")}</div>` : "";
   const tags = [];
+  if (message.hands_on) tags.push(`<span class="tag job" title="这一棒是你派的活:它可以改文件、跑命令">派活</span>`);
   if (message.note) tags.push(`<span class="tag${message.note.startsWith("⚠") ? " bad" : ""}">${esc(message.note)}</span>`);
   if (message.ctx) tags.push(`<span class="tag">上下文 ${tokens(message.ctx)} · 输出 ${tokens(message.out)}</span>`);
   return `<div class="msg${mine ? " me" : ""}" style="--who:${esc(who.color)}">${avatar(who)}<div class="body">
@@ -265,10 +266,15 @@ function linkCard(url) {
     <span class="ic">↗</span><span><div class="host">${esc(host)}</div><div class="url">${esc(url)}</div></span></a>`;
 }
 
+// 后台此刻在做的事:整理白板、被派活的成员在干活,或者照常发言
+const speakerNow = (view) => view.live?.speaker || view.turn;
+const jobNow = (view) => (view.job === "tidy" ? "正在整理白板"
+  : view.assignee && view.assignee === speakerNow(view) ? "正在干活" : "正在发言");
+
 function liveHtml() {
   const view = state.view;
   const live = view.live || { speaker: view.turn, text: "", status: "", started: Date.now() / 1000 };
-  const doing = live.status || (view.job === "tidy" ? "正在整理白板" : (live.text ? "正在发言" : "正在思考"));
+  const doing = live.status || (live.text || view.job === "tidy" ? jobNow(view) : "正在思考");
   const body = live.text
     ? `<div class="bub md">${renderMarkdown(live.text).html}</div>`
     : `<div class="bub"><span class="dots"><span></span><span></span><span></span></span></div>`;
@@ -357,7 +363,7 @@ function updateLive(live) {
 const COMPOSER = {
   new: { turn: () => "写下议题,发送后 AI 们开始发言", you: true, placeholder: "你想讨论什么?写得越具体,讨论越到点。", primary: "开始讨论" },
   user: { turn: (view) => `轮到你了 · 第 ${view.round} 轮`, you: true, placeholder: "写下你的意见…", primary: "发送,进入下一轮", finish: true },
-  running: { turn: (view) => `${nameOf(view.live?.speaker || view.turn)} ${view.job === "tidy" ? "正在整理白板" : "正在发言"}。想补充就直接写`, placeholder: "想插一句?写在这里,点「插入发言」,它会带着你的话重说这一棒…", primary: "插入发言", interrupt: true },
+  running: { turn: (view) => `${nameOf(speakerNow(view))} ${jobNow(view)}。想补充就直接写`, placeholder: "想插一句?写在这里,点「插入发言」,它会带着你的话重说这一棒…", primary: "插入发言", interrupt: true },
   paused: { turn: () => "讨论暂停了。可以补充一句再继续,也可以直接点上面的按钮", placeholder: "补充说明(可选)…", primary: "发送并继续", finish: true },
   done: { turn: () => "已收工。想接着聊,直接写下新想法", placeholder: "又想到新的了?写在这里,接着聊…", primary: "继续讨论" },
 };
@@ -371,7 +377,8 @@ function buildComposer() {
       <div class="bar">
         <button class="btn" data-act="pick">＋ 图片</button>
         <input type="file" id="picker" accept="image/png,image/jpeg" multiple hidden>
-        <span class="hint">可直接粘贴文字;图片可拖入或粘贴,只接受 PNG / JPG · ⌘↩ 发送</span>
+        <select class="btn" id="assignee" title="这一回只讨论,还是把活派给一位成员" hidden></select>
+        <span class="hint" id="hint"></span>
         <button class="btn danger" data-act="finish">收工</button>
         <button class="btn primary" data-act="send"></button>
       </div>
@@ -390,6 +397,7 @@ function buildComposer() {
     if (files.length) { event.preventDefault(); addImages(files); }
   });
   $("picker").addEventListener("change", (event) => { addImages([...event.target.files]); event.target.value = ""; });
+  $("assignee").addEventListener("change", () => updateAssignee());
   const box = $("box");
   box.addEventListener("dragover", (event) => { event.preventDefault(); box.classList.add("drop"); });
   box.addEventListener("dragleave", () => box.classList.remove("drop"));
@@ -422,7 +430,30 @@ function updateComposer({ switched = false } = {}) {
   input.placeholder = mode.placeholder;
   document.querySelector('[data-act="stop"]').hidden = view.phase !== "running";
   renderThumbs();
+  updateAssignee({ reset: switched });
   updateButtons();
+}
+
+// 派活选择:这一回只讨论,还是把活派给一位能动手的成员。选项没变就不重画,免得打断正在选的人
+const HINT = "可直接粘贴文字;图片可拖入或粘贴,只接受 PNG / JPG · ⌘↩ 发送";
+
+function updateAssignee({ reset = false } = {}) {
+  const picker = $("assignee");
+  const options = state.view.members.filter((id) => person(id).assignable)
+    .map((id) => `<option value="${esc(id)}">派活给 ${esc(nameOf(id))}</option>`).join("");
+  if (picker.dataset.options !== options) {
+    const chosen = picker.value;
+    picker.innerHTML = `<option value="">只讨论</option>${options}`;
+    picker.dataset.options = options;
+    picker.value = [...picker.options].some((option) => option.value === chosen) ? chosen : "";
+  }
+  if (reset) picker.value = "";
+  picker.hidden = !options;
+  const assignee = picker.value;
+  $("box").classList.toggle("assigning", Boolean(assignee));
+  $("hint").textContent = assignee
+    ? `这一回 ${nameOf(assignee)} 可以改文件、跑命令;删除、覆盖这类事它会先问你。其他成员只审查。`
+    : HINT;
 }
 
 // 发送 / 收工按钮此刻能不能点(每敲一个字都会重新判断)
@@ -475,7 +506,8 @@ async function send({ finish = false, extend = false } = {}) {
   state.sending = true;
   updateComposer();
   try {
-    const answer = await api.send(view.id, { text, finish, extend, interrupt });
+    const assignee = finish ? "" : $("assignee").value;
+    const answer = await api.send(view.id, { text, finish, extend, interrupt, assignee });
     if (answer.need_extend) {
       confirmDialog("到轮数上限了", `这场讨论已经到了 ${answer.max_rounds} 轮的上限。要再延长 ${answer.extend_by} 轮继续吗?`,
         `延长 ${answer.extend_by} 轮`, () => { send({ finish, extend: true }); });
@@ -485,6 +517,7 @@ async function send({ finish = false, extend = false } = {}) {
     autosize();
     state.drafts.delete(view.id);
     state.images.delete(view.id);
+    $("assignee").value = "";                               // 派活只管这一回,下一回默认只讨论
     await refreshView({ toEnd: true });
   } catch (error) {
     toast(error.message);
@@ -510,7 +543,7 @@ function renderSide() {
   const canTidy = hasItems && view.phase !== "running";
   const usage = view.members.filter((id) => view.health[id]?.ctx).map((id) => {
     const { ctx, window } = view.health[id];
-    return `<div class="row">${esc(nameOf(id))} 上一棒的上下文 <span class="v">${tokens(ctx)}</span>${window ? ` / ${tokens(window)}` : ""}</div>`;
+    return `<div class="row">${esc(nameOf(id))} 的上下文 <span class="v">${tokens(ctx)}</span>${window ? ` / ${tokens(window)}` : ""}</div>`;
   }).join("");
   const members = view.members.map((id) => {
     const who = person(id);
@@ -528,6 +561,7 @@ function renderSide() {
       ${over ? `<div class="warn">白板偏长了,AI 每一棒都要读它。建议整理一下。</div>` : "AI 每一棒只读白板和最近的发言,不读全文。"}
       ${board.problem ? `<div class="warn">${esc(board.problem)}</div>` : ""}
       ${usage}
+      ${usage ? `<div class="row fine">每一棒都从头读起:这就是它最近一棒的全部占用,不会一轮轮累加。</div>` : ""}
       ${canTidy && over ? `<div class="actions"><button class="btn primary small" data-act="tidy">让 AI 整理白板</button></div>` : ""}
     </div>
     <div class="sec">白板${canTidy && !over ? `<button class="link" data-act="tidy">整理</button>` : ""}</div>
@@ -716,6 +750,7 @@ function openSettings() {
       <div class="line"><span>轮数上限</span><input class="field num" type="number" min="1" max="200" data-setting="max_rounds" value="${draft.max_rounds}"><span class="state">到上限时会问你要不要延长</span></div>
       <div class="line"><span>白板长度提醒</span><input class="field num" type="number" min="500" step="500" data-setting="whiteboard_limit" value="${draft.whiteboard_limit}"><span class="state">超过这么多 token 就建议整理</span></div>
       <div class="line"><span>单棒最长等待</span><input class="field num" type="number" min="30" max="3600" step="30" data-setting="turn_timeout" value="${draft.turn_timeout}"><span class="state">秒;超时自动中止这一棒</span></div>
+      <div class="line"><span>派活时最长等待</span><input class="field num" type="number" min="60" max="14400" step="60" data-setting="hands_on_timeout" value="${draft.hands_on_timeout}"><span class="state">秒;被派活的那一棒要动手,给它更长的时间</span></div>
       <div class="line"><span>轮到我时提醒</span><label class="switch"><input type="checkbox" data-setting="notify"${draft.notify ? " checked" : ""}>程序坞图标跳动并响一声</label></div>
       <div class="line" style="align-items:flex-start"><span>讨论守则</span><textarea class="field" data-setting="rules">${esc(draft.rules)}</textarea></div>
       <div class="tip">每一棒都会交给 AI。改了立刻对之后的发言生效。</div>

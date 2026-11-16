@@ -1,6 +1,8 @@
 """调度:轮到谁、调用谁、把什么写进文档。
 
-程序是讨论文档与白板的唯一执笔人。AI 只输出文字,碰不到任何文件。
+程序是讨论文档与白板的唯一执笔人。AI 平时只输出文字,碰不到任何文件;
+用户可以在某一回把活派给一位成员(assignee),只有它、只在那一棒有动手权限
+(hands_on),干完把执行报告当作发言交回来。讨论文档与白板它仍然不许改。
 每场讨论同一时间只有一个后台任务(一棒发言,或一次白板整理)。
 """
 
@@ -134,7 +136,8 @@ class Engine:
             rows.append({
                 "id": session.id, "title": doc.title or session.id,
                 "phase": self._phase(session, status), "round": status.round,
-                "turn": self._name(status.turn), "pinned": session.id in pinned,
+                "turn": self._name(status.turn), "hands_on": status.turn == status.assignee,
+                "pinned": session.id in pinned,
                 "modified": session.path.stat().st_mtime})
         return sorted(rows, key=lambda row: (row["pinned"], row["modified"]), reverse=True)
 
@@ -170,6 +173,7 @@ class Engine:
             "id": sid, "title": doc.title or sid,
             "phase": self._phase(session, status),
             "round": status.round, "max_rounds": status.max_rounds, "turn": status.turn,
+            "assignee": status.assignee,
             "members": status.members, "people": people,
             "messages": [asdict(message) for message in doc.messages],
             "draft": doc.draft,
@@ -215,10 +219,11 @@ class Engine:
         return stem
 
     def send(self, sid: str, text: str, finish: bool = False, extend: bool = False,
-             interrupt: bool = False) -> dict[str, Any]:
+             interrupt: bool = False, assignee: str = "") -> dict[str, Any]:
         """用户发言。新讨论里它是议题;已收工的讨论里它接着往下聊;AI 出错暂停时它是插话。
 
-        interrupt:AI 正在发言时,先打断它,再把这段话作为插话交给它重说这一棒。"""
+        interrupt:AI 正在发言时,先打断它,再把这段话作为插话交给它重说这一棒。
+        assignee:这一回把活派给哪位成员(只有它那一棒能动手);为空 = 这一回只讨论。"""
         session = self._session(sid)
         text = text.strip()
         if interrupt and text and session.busy and session.job == "turn":
@@ -232,22 +237,26 @@ class Engine:
             waiting = status.phase == Phase.USER          # 旧版此时在文末留有占位段
             if not first:
                 raise EngineError("这场讨论没有 AI 成员(设置 → 成员)。")
+            if assignee and not finish:
+                self._check_assignee(status, assignee)
 
             if status.phase == Phase.NEW:
                 if finish or not (text or doc.topic):
                     raise EngineError("先写下你想讨论的问题。")
                 if text:
                     raw = document.with_topic(raw, text)
-                status = replace(status, phase=Phase.ACTIVE, round=1, turn=first)
+                status = replace(status, phase=Phase.ACTIVE, round=1, turn=first,
+                                 assignee=assignee)
             elif finish:
                 if text or waiting:
                     raw = document.with_user_message(raw, status.round, text or "收工。",
                                                      _now(), into_placeholder=waiting)
-                status = replace(status, phase=Phase.DONE, turn=USER_ID)
+                status = replace(status, phase=Phase.DONE, turn=USER_ID, assignee="")
             elif not text:
                 raise EngineError("写点什么再发送。")
             elif status.phase == Phase.ACTIVE:              # 暂停中的插话:不换轮,原地继续
                 raw = document.with_user_message(raw, status.round, text, _now())
+                status = replace(status, assignee=assignee or status.assignee)
             else:                                           # 轮到用户,或重新打开已收工的讨论
                 upcoming = status.round + 1
                 if upcoming > status.max_rounds:
@@ -258,7 +267,8 @@ class Engine:
                 target = upcoming if status.phase == Phase.DONE else status.round
                 raw = document.with_user_message(raw, target, text, _now(),
                                                  into_placeholder=waiting)
-                status = replace(status, phase=Phase.ACTIVE, round=upcoming, turn=first)
+                status = replace(status, phase=Phase.ACTIVE, round=upcoming, turn=first,
+                                 assignee=assignee)
 
             self._backup(session)
             status = replace(status, updated=_now())
@@ -288,6 +298,8 @@ class Engine:
             if status.phase != Phase.ACTIVE:
                 raise EngineError("现在没有可以跳过的发言。")
             note = f"⏭ 跳过了 {self._name(status.turn)} 的第 {status.round} 轮发言。"
+            if status.turn == status.assignee:              # 被派活的那位被跳过:这一回没人干活了
+                status = replace(status, assignee="")
             status = _after(status)
             write_text(session.path, document.with_status(
                 document.with_note(raw, status.round, note, _now()), status))
@@ -541,16 +553,24 @@ class Engine:
         board = self._board(session)
         provider = self._make_provider(member)
         attached = self._images(session, doc)
+        hands_on = status.assignee == member.id
+        speeches = {m.speaker: m.text for m in doc.messages if m.kind == "ai"}   # 各人最近一次发言
         context = prompts.TurnContext(
             speaker=member.name, round=status.round, topic=doc.topic, rules=self._rules(),
             board=whiteboard.render(board), doc_path=str(session.path),
-            others=self._latest_from_others(doc, status, member.id),
+            others=[(self._name(other), speeches[other]) for other in status.members
+                    if other != member.id and other in speeches],
             user_name=self.settings.user.name,
             user_text=next((m.text for m in reversed(doc.messages) if m.kind == "user"), ""),
             image_paths=[str(path) for path in attached],
-            can_see_images=provider.sees_images)
+            can_see_images=provider.sees_images,
+            assignee=self._name(status.assignee) if status.assignee else "",
+            hands_on=hands_on,
+            own_text=speeches.get(member.id, "") if hands_on else "",
+            protected=[str(folder) for folder in self.paths.protected] if hands_on else [])
         reply, ops, problem = self._ask(session, member, provider, prompts.turn(context),
-                                        board, attached if provider.sees_images else [])
+                                        board, attached if provider.sees_images else [],
+                                        status="正在干活" if hands_on else "", hands_on=hands_on)
         body, _ = whiteboard.split_reply(reply.text)
         if not body:
             raise ProviderError(f"{member.name} 没有输出任何内容。")
@@ -559,7 +579,7 @@ class Engine:
         with session.lock:
             raw = session.path.read_text(encoding="utf-8")
             raw = document.with_ai_message(raw, member.id, member.name, status.round, body,
-                                           note, _now(), reply.ctx, reply.out)
+                                           note, _now(), reply.ctx, reply.out, hands_on)
             write_text(session.path, document.with_status(raw, _after(status)))
             whiteboard.apply(board, ops, f"r{status.round}-{member.id.lower()}")
             write_text(session.state_path, whiteboard.render(board))
@@ -591,18 +611,24 @@ class Engine:
             write_text(session.path, document.with_note(raw, status.round, note, _now()))
 
     def _ask(self, session: Session, member: Member, provider: Provider, prompt: str,
-             board: whiteboard.Board, images: list[Path], status: str = ""
-             ) -> tuple[Reply, list[whiteboard.Op], str]:
-        """调用 AI 并取出合格的 STATE_OPS;不合格重试一次。返回(回复, 指令, 问题说明)。"""
+             board: whiteboard.Board, images: list[Path], status: str = "",
+             hands_on: bool = False) -> tuple[Reply, list[whiteboard.Op], str]:
+        """调用 AI 并取出合格的 STATE_OPS;不合格重试一次。返回(回复, 指令, 问题说明)。
+
+        hands_on:这一棒被派了活,可以动手。它从用户主目录出发(活可能在任何项目里),
+        时限更长;STATE_OPS 不合格也不重试——重试等于把活再干一遍。"""
         problem = ""
         reply = Reply("")
-        for attempt in (1, 2):
+        for attempt in (1,) if hands_on else (1, 2):
             session.live = Live(member.id, status=status, started=time.time())
             self._publish_live(session, force=True)
             reply = provider.run(Request(
                 prompt=prompt if attempt == 1 else prompts.retry(prompt, problem),
-                workdir=self.paths.discussions, env=self._environment(),
-                timeout=self.settings.turn_timeout, cancel=session.cancel, images=images,
+                workdir=Path.home() if hands_on else self.paths.discussions,
+                env=self._environment(),
+                timeout=self.settings.hands_on_timeout if hands_on else self.settings.turn_timeout,
+                cancel=session.cancel, images=images,
+                hands_on=hands_on, protected=self.paths.protected if hands_on else [],
                 on_text=lambda text: self._on_live(session, text=text),
                 on_status=lambda text: self._on_live(session, status=text)))
             try:
@@ -693,9 +719,29 @@ class Engine:
         """界面显示一个成员所需的信息;成员已被删掉时用它当年的名字兜底。"""
         member = self.settings.member(member_id)
         if member:
-            return {**asdict(member), "missing": False}
+            return {**asdict(member), "missing": False, "assignable": self._assignable(member)}
         name = last_name or member_id
-        return {**asdict(Member(member_id, name, "", name[:1], "#8a8a8a")), "missing": True}
+        return {**asdict(Member(member_id, name, "", name[:1], "#8a8a8a")),
+                "missing": True, "assignable": False}
+
+    def _assignable(self, member: Member) -> bool:
+        """这位成员能不能被派活(由它的类型决定)。"""
+        try:
+            return self._make_provider(member).assignable
+        except ProviderError:
+            return False
+
+    def _check_assignee(self, status: Status, assignee: str) -> None:
+        """派活的对象必须是这场讨论里能动手的成员,而且这一回还没轮过它。"""
+        member = self.settings.member(assignee) if assignee in status.members else None
+        if member is None:
+            raise EngineError("派活的对象不在这场讨论的成员里。")
+        if not self._assignable(member):
+            raise EngineError(f"{member.name} 只能发言,不能被派活。")
+        order = status.members
+        if status.phase == Phase.ACTIVE and status.turn in order \
+                and order.index(assignee) < order.index(status.turn):
+            raise EngineError(f"{member.name} 这一回已经发过言了。等这一回结束、轮到你时再派活给它。")
 
     def _rules(self) -> str:
         try:
@@ -716,12 +762,6 @@ class Engine:
             return self._board(session), ""
         except EngineError as err:
             return whiteboard.Board(), str(err)
-
-    def _latest_from_others(self, doc: Document, status: Status, speaker: str
-                            ) -> list[tuple[str, str]]:
-        latest = {m.speaker: m for m in doc.messages if m.kind == "ai"}
-        return [(self._name(member_id), latest[member_id].text)
-                for member_id in status.members if member_id != speaker and member_id in latest]
 
     def _images(self, session: Session, doc: Document) -> list[Path]:
         """用户最近一次发言(还没发过言则是议题)里引用的、确实存在的附图。"""
@@ -772,7 +812,7 @@ def _after(status: Status) -> Status:
     position = order.index(status.turn) if status.turn in order else len(order) - 1
     if position + 1 < len(order):
         return replace(status, turn=order[position + 1], updated=_now())
-    return replace(status, phase=Phase.USER, turn=USER_ID, updated=_now())
+    return replace(status, phase=Phase.USER, turn=USER_ID, assignee="", updated=_now())
 
 
 def _image_type(data: bytes) -> str:

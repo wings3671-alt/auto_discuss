@@ -62,6 +62,11 @@ class Paths:
     def log(self) -> Path:
         return self.data / "胡说八道群.log"
 
+    @property
+    def protected(self) -> list[Path]:
+        """只由程序执笔的文件夹:AI 即使被派了活,这里面的东西也只许读、不许改。"""
+        return [self.discussions, self.data]
+
     def ensure(self) -> None:
         for folder in (self.discussions, self.data, self.backups, self.avatars):
             folder.mkdir(parents=True, exist_ok=True)
@@ -145,7 +150,8 @@ class Settings:
     notify: bool = True
     max_rounds: int = 12
     turn_timeout: int = 600                 # 单次 AI 调用的超时秒数
-    whiteboard_limit: int = 6000            # 白板超过这么多 token 就提示整理
+    hands_on_timeout: int = 1800            # 被派活、动手的那一棒的超时秒数(干活比发言久)
+    whiteboard_limit: int = 10000           # 白板超过这么多 token 就提示整理
     keep_backups: int = 10
     theme: str = "auto"                     # 外观:auto(跟随系统)/ light / dark
     text_size: str = "medium"               # 字号:small / medium / large / xlarge
@@ -167,6 +173,7 @@ class Settings:
             notify=_bool(raw.get("notify"), base.notify),
             max_rounds=_int(raw.get("max_rounds"), base.max_rounds, 1, 200),
             turn_timeout=_int(raw.get("turn_timeout"), base.turn_timeout, 30, 3600),
+            hands_on_timeout=_int(raw.get("hands_on_timeout"), base.hands_on_timeout, 60, 14400),
             whiteboard_limit=_int(raw.get("whiteboard_limit"), base.whiteboard_limit, 500, 100000),
             keep_backups=_int(raw.get("keep_backups"), base.keep_backups, 1, 100),
             theme=_choice(raw.get("theme"), THEMES, base.theme),

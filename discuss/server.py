@@ -5,7 +5,7 @@
     POST   /api/discussions                    新建          {title}
     GET    /api/search?q=关键词                 在标题和发言里搜索
     GET    /api/discussions/<id>               一场讨论的全部内容
-    POST   /api/discussions/<id>/send          用户发言      {text, finish, extend, interrupt}
+    POST   /api/discussions/<id>/send          用户发言      {text, finish, extend, interrupt, assignee}
     POST   /api/discussions/<id>/<动作>         resume / skip / stop / tidy / sync
     POST   /api/discussions/<id>/rename        改标题        {title}
     POST   /api/discussions/<id>/pin           置顶          {pinned}
@@ -129,7 +129,8 @@ def _handler_for(engine: Engine) -> type[BaseHTTPRequestHandler]:
                 return self._json(engine.send(
                     sid, _text(body, "text"), finish=body.get("finish") is True,
                     extend=body.get("extend") is True,
-                    interrupt=body.get("interrupt") is True))
+                    interrupt=body.get("interrupt") is True,
+                    assignee=_text(body, "assignee")))
             if action == "trash":
                 return self._json(engine.trash(sid, with_nas=self._body().get("nas") is True))
             if action == "export":

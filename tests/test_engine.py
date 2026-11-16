@@ -22,12 +22,14 @@ NO_OPS = '```STATE_OPS\n{"ops": []}\n```'
 
 
 class FakeAI:
-    """按剧本作答的假 AI。剧本是 {成员编号: [回复或异常, ...]},用完后答默认内容。"""
+    """按剧本作答的假 AI。剧本是 {成员编号: [回复或异常, ...]},用完后答默认内容。
+    和真实情况一样,只有 Claude 类型的成员能被派活。"""
 
     sees_images = True
 
     def __init__(self, member, script, calls):
         self.member, self.script, self.calls = member, script, calls
+        self.assignable = member.kind == "claude"
 
     def run(self, request):
         self.calls.append((self.member.id, request))
@@ -241,6 +243,126 @@ class Trouble(EngineCase):
         self.assertEqual(view["phase"], "paused")
         self.assertIn("已不在成员名单里", view["error"])
         self.assertTrue(view["people"]["CLAUDE"]["missing"])
+
+
+class Assigning(EngineCase):
+    """派活:用户点名一位成员,只有它、只在那一棒能动手。"""
+
+    def requests(self, member_id):
+        return [request for who, request in self.calls if who == member_id]
+
+    def test_only_the_assignee_gets_hands_on(self):
+        sid, _ = self.started()
+        self.engine.send(sid, "把 a.txt 改成 b", assignee="CLAUDE")
+        view = self.idle(sid)
+        claude, codex = self.requests("CLAUDE")[-1], self.requests("CODEX")[-1]
+        self.assertTrue(claude.hands_on)
+        self.assertEqual(claude.protected, [self.paths.discussions, self.paths.data])
+        self.assertEqual((claude.workdir, claude.timeout), (Path.home(), 1800))
+        self.assertIn("【派活守则 —— 这一棒你能改文件、跑命令", claude.prompt)
+        self.assertIn(str(self.paths.discussions), claude.prompt)        # 告诉它哪里不许改
+        self.assertFalse(codex.hands_on)
+        self.assertEqual((codex.protected, codex.workdir, codex.timeout),
+                         ([], self.paths.discussions, 600))
+        self.assertIn("这是派给 Claude 的活,不是派给你的", codex.prompt)
+        self.assertIn("【派活守则 —— Claude 这一棒必须遵守;你审查时对照它】", codex.prompt)
+        rules = "- 只做 我 明确吩咐的事。"                                # 两边拿到同一份条文
+        self.assertEqual(claude.prompt.split(rules)[1].split("STATE_OPS 代码块 ——")[0],
+                         codex.prompt.split(rules)[1].split("STATE_OPS 代码块 ——")[0])
+        self.assertEqual([m["hands_on"] for m in view["messages"][-2:]], [True, False])
+        self.assertEqual(view["assignee"], "")                           # 这一回结束,派活也结束
+
+    def test_next_round_is_plain_talk_again(self):
+        sid, _ = self.started()
+        self.engine.send(sid, "干活", assignee="CLAUDE")
+        self.idle(sid)
+        self.engine.send(sid, "接着聊")
+        self.idle(sid)
+        self.assertFalse(self.requests("CLAUDE")[-1].hands_on)
+        self.assertNotIn("派给", self.requests("CODEX")[-1].prompt)
+
+    def test_first_message_can_assign(self):
+        sid = self.engine.create("遮阳棚")
+        self.engine.send(sid, "量一下阳台尺寸", assignee="CLAUDE")
+        self.idle(sid)
+        self.assertTrue(self.requests("CLAUDE")[0].hands_on)
+
+    def test_assignee_sees_its_own_last_speech(self):
+        self.script["CLAUDE"] = [f"我打算删掉旧文件,可以吗?\n\n{NO_OPS}"]
+        sid, _ = self.started()
+        self.engine.send(sid, "可以,删吧", assignee="CLAUDE")
+        self.idle(sid)
+        self.assertIn("【你自己上一次的发言】\n我打算删掉旧文件,可以吗?",
+                      self.requests("CLAUDE")[-1].prompt)
+        self.assertNotIn("【你自己上一次的发言】", self.requests("CODEX")[-1].prompt)
+
+    def test_only_assignable_members_of_this_discussion(self):
+        sid, _ = self.started()
+        for assignee, reason in (("CODEX", "不能被派活"), ("NOBODY", "不在这场讨论的成员里")):
+            with self.assertRaises(EngineError) as refused:
+                self.engine.send(sid, "干活", assignee=assignee)
+            self.assertIn(reason, str(refused.exception))
+        view = self.engine.view(sid)
+        self.assertEqual((view["phase"], view["round"]), ("user", 1))    # 被拒绝的发言没有写进去
+        self.assertEqual([view["people"][who]["assignable"] for who in ("CLAUDE", "CODEX")],
+                         [True, False])
+
+    def test_hands_on_turn_is_never_rerun_for_bad_ops(self):
+        sid, _ = self.started()
+        self.script["CLAUDE"] = ["活干完了,但没带白板指令。"]
+        before = len(self.requests("CLAUDE"))
+        self.engine.send(sid, "干活", assignee="CLAUDE")
+        view = self.idle(sid)
+        self.assertEqual(len(self.requests("CLAUDE")) - before, 1)       # 重来等于把活再干一遍
+        report = view["messages"][-2]
+        self.assertEqual(report["text"], "活干完了,但没带白板指令。")
+        self.assertTrue(report["note"].startswith("⚠ 白板未更新"))
+
+    def test_failed_job_stays_assigned_for_retry_and_interjection(self):
+        sid, _ = self.started()
+        self.script["CLAUDE"] = [ProviderError("断网了"), ProviderError("又断了")]
+        self.engine.send(sid, "干活", assignee="CLAUDE")
+        view = self.idle(sid)
+        self.assertEqual((view["phase"], view["turn"], view["assignee"]),
+                         ("paused", "CLAUDE", "CLAUDE"))
+        self.engine.resume(sid)                                          # 重试这一棒
+        self.idle(sid)
+        self.engine.send(sid, "补充:只改第一行")                          # 暂停时插话,没有重新点名
+        self.idle(sid)
+        self.assertEqual([request.hands_on for request in self.requests("CLAUDE")[-3:]],
+                         [True, True, True])
+
+    def test_skipping_the_assignee_cancels_the_job(self):
+        sid, _ = self.started()
+        self.script["CLAUDE"] = [ProviderError("断网了")]
+        self.engine.send(sid, "干活", assignee="CLAUDE")
+        self.idle(sid)
+        self.engine.skip(sid)
+        self.idle(sid)
+        self.assertNotIn("派给", self.requests("CODEX")[-1].prompt)
+
+    def test_cannot_assign_someone_whose_turn_has_passed(self):
+        self.script["CODEX"] = [ProviderError("断网了")]
+        sid, view = self.started()
+        self.assertEqual(view["turn"], "CODEX")                          # Claude 这一回已经说完
+        with self.assertRaises(EngineError) as refused:
+            self.engine.send(sid, "再干点活", assignee="CLAUDE")
+        self.assertIn("这一回已经发过言了", str(refused.exception))
+
+    def test_assignment_is_recorded_in_the_document(self):
+        sid, _ = self.started()
+        self.script["CLAUDE"] = ["BLOCK"]
+        self.engine.send(sid, "干活", assignee="CLAUDE")
+        path = self.paths.discussions / f"{sid}.md"
+        self.assertIn("\nassignee: CLAUDE\n", path.read_text(encoding="utf-8"))
+        self.assertTrue(self.engine.summaries()[0]["hands_on"])          # 列表里显示"正在干活"
+        self.engine.stop(sid)
+        self.idle(sid)
+        self.engine.resume(sid)
+        self.idle(sid)
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("assignee:", text)
+        self.assertEqual(text.count(" hands_on=1 -->"), 1)
 
 
 class Extras(EngineCase):
