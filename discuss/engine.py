@@ -654,6 +654,8 @@ class Engine:
 
         hands_on:这一棒被派了活,可以动手。它从用户主目录出发(活可能在任何项目里),
         时限更长;STATE_OPS 不合格也不重试——重试等于把活再干一遍。"""
+        writable = [Path(folder) for folder in self.settings.hands_on_folders
+                    if hands_on and os.path.isdir(folder)]
         problem = ""
         reply = Reply("")
         for attempt in (1,) if hands_on else (1, 2):
@@ -666,6 +668,7 @@ class Engine:
                 timeout=self.settings.hands_on_timeout if hands_on else self.settings.turn_timeout,
                 cancel=session.cancel, images=images,
                 hands_on=hands_on, protected=self.paths.protected if hands_on else [],
+                writable=writable,
                 on_text=lambda text: self._on_live(session, text=text),
                 on_status=lambda text: self._on_live(session, status=text)))
             try:

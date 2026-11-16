@@ -56,6 +56,7 @@ class Request:
     images: list[Path] = field(default_factory=list)
     hands_on: bool = False                        # 这一棒被派了活:允许改文件、跑命令
     protected: list[Path] = field(default_factory=list)   # 动手时也不许写的文件夹
+    writable: list[Path] = field(default_factory=list)    # 动手时,工作目录之外还能写的文件夹
     on_text: Callable[[str], None] = _ignore      # 已输出的全文(不是增量)
     on_status: Callable[[str], None] = _ignore    # 此刻在做什么,如"正在联网搜索"
 
@@ -260,26 +261,40 @@ class Claude:
 class Codex:
     sees_images = True
     reads_files = True
-    assignable = False
+    assignable = True
     _LOGIN_HINT = "看起来是登录问题:请打开终端运行 codex login 重新登录后再点重试。"
     _ITEM_STATUS = {"reasoning": "正在思考", "command_execution": "正在查看文件",
+                    "file_change": "正在修改文件",
                     "web_search": "正在联网搜索", "mcp_tool_call": "正在使用工具"}
 
     def __init__(self, member: Member) -> None:
         self.model = member.model
 
-    def run(self, request: Request) -> Reply:
+    def command(self, request: Request) -> list[str]:
+        """命令行。这一棒能做什么全在这里定:发言用只读沙箱;被派活才换成可写沙箱。
+
+        Codex 的权限按文件夹划:可写沙箱里它只能写工作目录、临时目录和点了名的文件夹,
+        别处由系统拦住。所以它没法单独禁止 request.protected,那两个文件夹靠派活守则约束。"""
         cmd = [_find("codex", "/opt/homebrew/bin/codex", request.env),
                "-a", "never",                  # 无人值守:不停下来等人工审批
-               "exec", "-C", str(request.workdir), "--skip-git-repo-check",
-               "-s", "read-only",              # 只读沙箱:能看文件,不能写
-               "--json"]
+               "exec", "-C", str(request.workdir), "--skip-git-repo-check", "--json"]
+        if request.hands_on:
+            cmd += ["-s", "workspace-write",   # 干活常要装依赖、拉代码,所以放开联网
+                    "-c", "sandbox_workspace_write.network_access=true"]
+            for folder in request.writable:
+                cmd += ["--add-dir", str(folder)]
+        else:
+            cmd += ["-s", "read-only"]         # 只读沙箱:能看文件,不能写
         if self.model:
             cmd += ["-m", self.model]
         cmd.append(request.prompt)             # 提示词要放在 -i 之前,否则会被当成图片
         for image in request.images:
             cmd += ["-i", str(image)]
+        return cmd
 
+    def run(self, request: Request) -> Reply:
+        statuses = {**self._ITEM_STATUS, "command_execution": "正在执行命令"} \
+            if request.hands_on else self._ITEM_STATUS
         text, problem, thread = "", "", ""
         usage: dict[str, Any] = {}
 
@@ -294,7 +309,7 @@ class Codex:
                 text = str(item.get("text") or "")
                 request.on_text(text)
             elif kind in ("item.started", "item.completed"):
-                status = self._ITEM_STATUS.get(str(item.get("type")))
+                status = statuses.get(str(item.get("type")))
                 if status:
                     request.on_status(status)
             elif kind == "turn.completed":
@@ -304,7 +319,7 @@ class Codex:
             elif kind == "error":
                 problem = str(event.get("message") or "未知错误")
 
-        code, stderr = _run_process(cmd, request, "", on_line)
+        code, stderr = _run_process(self.command(request), request, "", on_line)
         if problem:
             raise ProviderError(_with_login_hint(f"Codex 报错:{problem}", self._LOGIN_HINT))
         if code != 0 or not text:

@@ -315,6 +315,7 @@ button.file:hover { border-color: var(--faint); border-left-color: var(--accent)
 .set .state.good { color: var(--ok); }
 .set .state.bad { color: var(--warn); }
 .set textarea.field { min-height: 120px; resize: vertical; line-height: 1.55; }
+.set textarea.field.short { min-height: 54px; }
 .person { border: 1px solid var(--line); border-radius: 4px; padding: 10px; margin-bottom: 8px; background: var(--card); }
 .person .top { display: flex; align-items: center; gap: 8px; }
 .person .top .field { flex: 1; min-width: 0; }

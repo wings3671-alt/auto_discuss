@@ -768,6 +768,8 @@ function openSettings() {
       <div class="line"><span>白板长度提醒</span><input class="field num" type="number" min="500" step="500" data-setting="whiteboard_limit" value="${draft.whiteboard_limit}"><span class="state">超过这么多 token 就建议整理</span></div>
       <div class="line"><span>单棒最长等待</span><input class="field num" type="number" min="30" max="3600" step="30" data-setting="turn_timeout" value="${draft.turn_timeout}"><span class="state">秒;超时自动中止这一棒</span></div>
       <div class="line"><span>派活时最长等待</span><input class="field num" type="number" min="60" max="14400" step="60" data-setting="hands_on_timeout" value="${draft.hands_on_timeout}"><span class="state">秒;被派活的那一棒要动手,给它更长的时间</span></div>
+      <div class="line" style="align-items:flex-start"><span>派活时还能改的文件夹</span><textarea class="field short" data-setting="hands_on_folders" data-lines placeholder="一行一个,例:/Volumes/外置硬盘">${esc(draft.hands_on_folders.join("\n"))}</textarea></div>
+      <div class="tip">只对 Codex 类型的成员有用:它干活时只能改你主目录里的东西,别处由系统拦住;想让它改外置硬盘上的项目,把那个文件夹写在这里。Claude Code 类型的成员不受这个限制。</div>
       <div class="line"><span>轮到我时提醒</span><label class="switch"><input type="checkbox" data-setting="notify"${draft.notify ? " checked" : ""}>程序坞图标跳动并响一声</label></div>
       <div class="line" style="align-items:flex-start"><span>讨论守则</span><textarea class="field" data-setting="rules">${esc(draft.rules)}</textarea></div>
       <div class="tip">每一棒都会交给 AI。改了立刻对之后的发言生效。</div>
@@ -782,7 +784,10 @@ function openSettings() {
 
   form.addEventListener("input", (event) => {
     const field = event.target;
-    const value = field.type === "checkbox" ? field.checked : field.type === "number" ? Number(field.value) : field.value;
+    const value = field.type === "checkbox" ? field.checked
+      : field.type === "number" ? Number(field.value)
+      : "lines" in field.dataset ? field.value.split("\n").map((line) => line.trim()).filter(Boolean)   // 一行一项
+      : field.value;
     const row = field.closest(".person");
     if (row && field.dataset.key) {
       const who = everyone()[Number(row.dataset.index)];

@@ -86,8 +86,8 @@ class ServerCase(unittest.TestCase):
     def test_assignee_is_passed_through(self):
         sid = self.json("POST", "/api/discussions", {"title": "x"})[1]["id"]
         status, answer = self.json("POST", f"/api/discussions/{sid}/send",
-                                   {"text": "干活", "assignee": "CODEX"})
-        self.assertEqual((status, answer), (400, {"error": "Codex 只能发言,不能被派活。"}))
+                                   {"text": "干活", "assignee": "NOBODY"})
+        self.assertEqual((status, answer), (400, {"error": "派活的对象不在这场讨论的成员里。"}))
         self.assertEqual(self.json("POST", f"/api/discussions/{sid}/send",
                                    {"text": "干活", "assignee": "CLAUDE"}), (200, {"ok": True}))
 

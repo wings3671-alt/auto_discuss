@@ -23,14 +23,14 @@ NO_OPS = '```STATE_OPS\n{"ops": []}\n```'
 
 class FakeAI:
     """按剧本作答的假 AI。剧本是 {成员编号: [回复或异常, ...]},用完后答默认内容。
-    和真实情况一样,只有 Claude 类型的成员能被派活。"""
+    和真实情况一样,只有 Claude 和 Codex 类型的成员能被派活。"""
 
     sees_images = True
     reads_files = True
 
     def __init__(self, member, script, calls):
         self.member, self.script, self.calls = member, script, calls
-        self.assignable = member.kind == "claude"
+        self.assignable = member.kind in ("claude", "codex")
 
     def run(self, request):
         self.calls.append((self.member.id, request))
@@ -297,15 +297,38 @@ class Assigning(EngineCase):
         self.assertNotIn("【你自己上一次的发言】", self.requests("CODEX")[-1].prompt)
 
     def test_only_assignable_members_of_this_discussion(self):
+        settings = self.engine.settings_view()
+        settings["members"].append({"id": "LOCAL", "name": "千问", "kind": "ollama", "model": "qwen3"})
+        self.engine.update_settings(settings)
         sid, _ = self.started()
-        for assignee, reason in (("CODEX", "不能被派活"), ("NOBODY", "不在这场讨论的成员里")):
+        for assignee, reason in (("LOCAL", "千问 只能发言,不能被派活"),
+                                 ("NOBODY", "不在这场讨论的成员里")):
             with self.assertRaises(EngineError) as refused:
                 self.engine.send(sid, "干活", assignee=assignee)
             self.assertIn(reason, str(refused.exception))
         view = self.engine.view(sid)
         self.assertEqual((view["phase"], view["round"]), ("user", 1))    # 被拒绝的发言没有写进去
-        self.assertEqual([view["people"][who]["assignable"] for who in ("CLAUDE", "CODEX")],
-                         [True, False])
+        self.assertEqual([view["people"][who]["assignable"] for who in ("CLAUDE", "CODEX", "LOCAL")],
+                         [True, True, False])
+
+    def test_any_assignable_member_can_be_the_assignee(self):
+        sid, _ = self.started()
+        self.engine.send(sid, "干活", assignee="CODEX")
+        self.idle(sid)
+        claude, codex = self.requests("CLAUDE")[-1], self.requests("CODEX")[-1]
+        self.assertEqual((claude.hands_on, codex.hands_on), (False, True))
+        self.assertIn("这是派给 Codex 的活,不是派给你的", claude.prompt)   # 排在前面的成员先谈怎么干
+
+    def test_extra_writable_folders_go_only_to_the_hands_on_turn(self):
+        settings = self.engine.settings_view()
+        settings["hands_on_folders"] = [self.tmp.name, "/没有这个文件夹", "相对路径", 7]
+        self.engine.update_settings(settings)
+        self.assertEqual(self.engine.settings.hands_on_folders, [self.tmp.name, "/没有这个文件夹"])
+        sid, _ = self.started()
+        self.engine.send(sid, "干活", assignee="CODEX")
+        self.idle(sid)
+        self.assertEqual(self.requests("CODEX")[-1].writable, [Path(self.tmp.name)])   # 不存在的不给
+        self.assertEqual(self.requests("CLAUDE")[-1].writable, [])
 
     def test_hands_on_turn_is_never_rerun_for_bad_ops(self):
         sid, _ = self.started()

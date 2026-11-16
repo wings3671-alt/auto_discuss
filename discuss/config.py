@@ -95,6 +95,12 @@ def _int(value: Any, default: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 
 
+def _folders(value: Any) -> list[str]:
+    """一组文件夹的绝对路径:不是文字的、不是绝对路径的丢掉,去掉重复。"""
+    paths = [item.strip() for item in value if isinstance(item, str)] if isinstance(value, list) else []
+    return list(dict.fromkeys(path for path in paths if path.startswith("/")))
+
+
 # ── 成员 ────────────────────────────────────────────────────────────────────
 @dataclass
 class Member:
@@ -151,6 +157,7 @@ class Settings:
     max_rounds: int = 12
     turn_timeout: int = 600                 # 单次 AI 调用的超时秒数
     hands_on_timeout: int = 1800            # 被派活、动手的那一棒的超时秒数(干活比发言久)
+    hands_on_folders: list[str] = field(default_factory=list)   # 动手时,主目录之外还能写的文件夹
     whiteboard_limit: int = 10000           # 白板超过这么多 token 就提示整理
     keep_backups: int = 10
     theme: str = "auto"                     # 外观:auto(跟随系统)/ light / dark
@@ -174,6 +181,7 @@ class Settings:
             max_rounds=_int(raw.get("max_rounds"), base.max_rounds, 1, 200),
             turn_timeout=_int(raw.get("turn_timeout"), base.turn_timeout, 30, 3600),
             hands_on_timeout=_int(raw.get("hands_on_timeout"), base.hands_on_timeout, 60, 14400),
+            hands_on_folders=_folders(raw.get("hands_on_folders")),
             whiteboard_limit=_int(raw.get("whiteboard_limit"), base.whiteboard_limit, 500, 100000),
             keep_backups=_int(raw.get("keep_backups"), base.keep_backups, 1, 100),
             theme=_choice(raw.get("theme"), THEMES, base.theme),

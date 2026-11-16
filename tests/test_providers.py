@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from discuss.config import Member
-from discuss.providers import Claude, Request, _codex_context
+from discuss.providers import Claude, Codex, Request, _codex_context
 
 
 def request(**extra):
@@ -43,6 +43,35 @@ class ClaudeCommand(unittest.TestCase):
     def test_model_is_passed_when_set(self):
         cmd = Claude(Member("CLAUDE", "Claude", "claude", model="haiku")).command(request())
         self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
+
+
+class CodexCommand(unittest.TestCase):
+    """Codex 的权限是沙箱定的:平时只读;被派活才能写,而且只能写点了名的地方。"""
+
+    def setUp(self):
+        self.codex = Codex(Member("CODEX", "Codex", "codex"))
+
+    def test_talk_turn_runs_in_the_read_only_sandbox(self):
+        cmd = self.codex.command(request(writable=[Path("/外置硬盘")]))
+        self.assertEqual(cmd[cmd.index("-s") + 1], "read-only")
+        self.assertNotIn("--add-dir", cmd)                           # 只读时不认额外的文件夹
+        self.assertNotIn("sandbox_workspace_write.network_access=true", cmd)
+
+    def test_hands_on_turn_can_write_the_workdir_and_named_folders_only(self):
+        cmd = self.codex.command(request(hands_on=True, writable=[Path("/外置硬盘"), Path("/另一块盘")]))
+        self.assertEqual(cmd[cmd.index("-s") + 1], "workspace-write")   # 不是"完全放开"
+        self.assertNotIn("danger-full-access", cmd)
+        self.assertEqual([cmd[i + 1] for i, part in enumerate(cmd) if part == "--add-dir"],
+                         ["/外置硬盘", "/另一块盘"])
+        self.assertEqual(cmd[cmd.index("-C") + 1], "/")                # 工作目录由调度器定
+        self.assertEqual(cmd[cmd.index("-a") + 1], "never")            # 无人值守,不等人工审批
+
+    def test_prompt_comes_before_images(self):
+        cmd = Codex(Member("CODEX", "Codex", "codex", model="gpt")).command(
+            Request(prompt="提示词", workdir=Path("/"), env={}, timeout=1, cancel=threading.Event(),
+                    images=[Path("/图.png")]))
+        self.assertLess(cmd.index("提示词"), cmd.index("-i"))           # -i 会吞掉它后面的参数
+        self.assertEqual(cmd[cmd.index("-m") + 1], "gpt")
 
 
 class CodexContext(unittest.TestCase):
