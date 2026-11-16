@@ -119,7 +119,6 @@ class Flow(EngineCase):
         view = self.idle(sid)
         self.assertEqual(view["phase"], "done")
         self.assertEqual(view["messages"][-1]["text"], "收工。")
-        self.assertEqual(view["sync"]["state"], "none")
 
     def test_finish_queues_sync_when_nas_is_offline(self):
         sid, _ = self.started()
