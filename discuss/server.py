@@ -11,8 +11,9 @@
     POST   /api/discussions/<id>/pin           置顶          {pinned}
     POST   /api/discussions/<id>/trash         移到废纸篓    {nas}
     POST   /api/discussions/<id>/export        保存导出的网页(请求体即网页)
-    POST   /api/discussions/<id>/attachments   上传附图(请求体即图片)
-    GET    /api/discussions/<id>/files/<名>    读附图
+    POST   /api/discussions/<id>/attachments   上传附件(请求体即文件;图片、文件都走这里)
+    GET    /api/discussions/<id>/files/<名>    读附图(只给图片)
+    POST   /api/discussions/<id>/reveal        在访达里显示一份附件  {name}
     GET    /api/settings      PUT /api/settings
     POST   /api/avatars/<成员>   GET /api/avatars/<名>
     GET    /api/events                         变化通知(SSE 长连接)
@@ -35,7 +36,7 @@ log = logging.getLogger("discuss")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 _MAX_JSON_BYTES = 2 * 1024 * 1024
-_MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+_MAX_UPLOAD_BYTES = 51 * 1024 * 1024         # 比附件上限略大:超限的提示留给 engine 来说
 _MAX_EXPORT_BYTES = 200 * 1024 * 1024
 _SIMPLE_ACTIONS = ("resume", "skip", "stop", "tidy")
 
@@ -143,6 +144,8 @@ def _handler_for(engine: Engine) -> type[BaseHTTPRequestHandler]:
             elif action == "attachments":
                 name = unquote(self.headers.get("X-Filename") or "图片")
                 return self._json(engine.attach(sid, name, self._upload()))
+            elif action == "reveal":
+                engine.reveal(sid, _text(self._body(), "name"))
             elif action == "sync":
                 engine.sync_later(sid)
             elif action in _SIMPLE_ACTIONS:

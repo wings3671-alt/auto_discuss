@@ -225,6 +225,10 @@ class Write(unittest.TestCase):
         self.assertEqual(document.image_paths("看 ![现状](遮阳棚_附件/1.png) 和 ![b](x/2.jpg)"),
                          ["遮阳棚_附件/1.png", "x/2.jpg"])
 
+    def test_file_paths_are_links_that_are_not_images(self):
+        text = "看 ![图](附件/1.png)、[报价.pdf](附件/2.pdf) 和 [官网](https://example.com)"
+        self.assertEqual(document.file_paths(text), ["附件/2.pdf", "https://example.com"])
+
 
 if __name__ == "__main__":
     unittest.main()

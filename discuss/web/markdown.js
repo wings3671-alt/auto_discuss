@@ -1,7 +1,9 @@
 // 把 Markdown 渲染成 HTML。所有文字先转义再加标签,AI 输出里的 HTML 不会被执行。
 //
-// renderMarkdown(source, { resolveImage }) → { html, links }
+// renderMarkdown(source, { resolveImage, resolveFile }) → { html, links }
 //   resolveImage(路径) 返回本机图片地址;返回 null 的图片不显示,只给一个链接。
+//   resolveFile(路径) 返回附件的文件名;是附件的链接画成一枚文件签(button.file,data-file 里是文件名),
+//   点它要做什么由界面决定。
 //   links 是正文里出现过的网址,供界面做"链接卡片"。
 
 const escapeHtml = (text) => text
@@ -21,8 +23,8 @@ const startsBlock = (lines, i) =>
   FENCE.test(lines[i]) || HEADING.test(lines[i]) || RULE.test(lines[i])
   || /^\s*>/.test(lines[i]) || LIST_ITEM.test(lines[i]) || isTableStart(lines, i);
 
-export function renderMarkdown(source, { resolveImage = () => null } = {}) {
-  const context = { links: [], resolveImage };
+export function renderMarkdown(source, { resolveImage = () => null, resolveFile = () => null } = {}) {
+  const context = { links: [], resolveImage, resolveFile };
   const lines = source.replace(/\r\n?/g, "\n").replace(/^&lt;!--/gm, "<!--").split("\n");
   return { html: blocks(lines, context), links: context.links };
 }
@@ -129,6 +131,10 @@ function inline(text, context) {
     if (local) return keep(`<img class="pic" src="${escapeHtml(local)}" alt="${escapeHtml(alt)}" loading="lazy">`);
     if (/^https?:\/\//.test(url)) return keep(link(url, `🖼 ${escapeHtml(alt || "图片")}`));
     return keep(escapeHtml(whole));
+  });
+  rest = rest.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (whole, label, path) => {
+    const file = context.resolveFile(path);
+    return file ? keep(`<button class="file" data-file="${escapeHtml(file)}" title="在访达里显示">${escapeHtml(label)}</button>`) : whole;
   });
   rest = rest.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     (_, label, url) => keep(link(url, emphasis(escapeHtml(label)))));

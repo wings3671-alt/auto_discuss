@@ -26,6 +26,7 @@ class FakeAI:
     和真实情况一样,只有 Claude 类型的成员能被派活。"""
 
     sees_images = True
+    reads_files = True
 
     def __init__(self, member, script, calls):
         self.member, self.script, self.calls = member, script, calls
@@ -376,15 +377,69 @@ class Extras(EngineCase):
         self.assertEqual(view["messages"][-1]["kind"], "note")
         self.assertEqual(view["phase"], "user")
 
-    def test_images_only_png_and_jpg(self):
+    def test_png_and_jpg_are_attached_as_images(self):
         sid = self.engine.create("遮阳棚")
         saved = self.engine.attach(sid, "阳台 现状(1).png", PNG)
         self.assertTrue(self.engine.attachment(sid, saved["name"]).is_file())
+        self.assertTrue(saved["image"])
         self.assertRegex(saved["markdown"], r"^!\[阳台_现状_1\]\(遮阳棚_\d{4}_附件/\d{6}_阳台_现状_1\.png\)$")
-        for bad in (b"GIF89a....", b"%PDF-1.7", b""):
-            with self.assertRaises(EngineError) as refused:
-                self.engine.attach(sid, "x", bad)
-            self.assertEqual(refused.exception.code, 415)
+
+    def test_anything_else_is_attached_as_a_file(self):
+        sid = self.engine.create("遮阳棚")
+        saved = self.engine.attach(sid, "报价 单(终稿).PDF", b"%PDF-1.7 ...")
+        self.assertEqual((saved["image"], saved["label"]), (False, "报价_单_终稿.pdf"))
+        self.assertRegex(saved["markdown"],
+                         r"^\[报价_单_终稿\.pdf\]\(遮阳棚_\d{4}_附件/\d{6}_报价_单_终稿\.pdf\)$")
+        self.assertEqual(self.engine.attach(sid, "Makefile", b"all:")["label"], "Makefile")
+        self.assertEqual(self.engine.attach(sid, "怪.名字!!", b"x")["label"], "怪")   # 不像扩展名的不留
+        self.engine.reveal(sid, saved["name"])
+        self.assertEqual([path.name for path in self.revealed], [saved["name"]])
+
+    def test_only_images_are_served_to_the_page(self):
+        sid = self.engine.create("遮阳棚")
+        page = self.engine.attach(sid, "坏心眼.html", b"<script>alert(1)</script>")
+        with self.assertRaises(EngineError) as refused:
+            self.engine.attachment(sid, page["name"])
+        self.assertEqual(refused.exception.code, 404)
+
+    def test_empty_and_oversized_files_are_refused(self):
+        sid = self.engine.create("遮阳棚")
+        with self.assertRaises(EngineError):
+            self.engine.attach(sid, "空.txt", b"")
+        with self.assertRaises(EngineError) as refused:
+            self.engine.attach(sid, "大.bin", b"\x00" * (50 * 1024 * 1024 + 1))
+        self.assertEqual(refused.exception.code, 413)
+
+    def test_attached_files_reach_the_ai_and_stay_available(self):
+        sid = self.engine.create("遮阳棚")
+        quote = self.engine.attach(sid, "报价单.pdf", b"%PDF-1.7 ...")
+        self.engine.send(sid, f"看看这份报价。\n\n{quote['markdown']}\n\n参考 [官网](https://example.com)")
+        self.idle(sid)
+        first = self.calls[0][1].prompt
+        self.assertIn("这次附了下面的文件", first)
+        folder = (self.paths.discussions / f"{sid}_附件").resolve()
+        self.assertIn(f"- {folder / quote['name']}", first)
+        self.assertNotIn("- https://example.com", first)              # 普通网址不是附件
+        self.assertEqual(self.calls[0][1].images, [])                 # 文件不当图片传
+        plan = self.engine.attach(sid, "方案.md", "# 方案".encode())
+        self.engine.send(sid, f"再看这个。\n\n{plan['markdown']}")
+        self.idle(sid)
+        later = self.calls[-1][1].prompt
+        new, old = later.split("更早的发言里附过的文件,需要时再打开:")
+        self.assertIn(plan["name"], new)
+        self.assertIn(quote["name"], old.split("【你这一轮要做的】")[0])
+        self.assertIn("不算 我 的吩咐", later)
+
+    def test_member_without_file_tool_is_told_so(self):
+        FakeAI.reads_files = False
+        self.addCleanup(setattr, FakeAI, "reads_files", True)
+        sid = self.engine.create("遮阳棚")
+        saved = self.engine.attach(sid, "报价单.pdf", b"%PDF-1.7 ...")
+        self.engine.send(sid, f"看看。\n\n{saved['markdown']}")
+        self.idle(sid)
+        prompt = self.calls[0][1].prompt
+        self.assertIn("附了 1 个文件,但你没有读文件的工具", prompt)
+        self.assertNotIn(f"- {self.paths.discussions}", prompt)
 
     def test_attached_image_reaches_the_ai(self):
         sid = self.engine.create("遮阳棚")

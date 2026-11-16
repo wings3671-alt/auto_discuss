@@ -184,12 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return nil
     }
 
-    /// 「＋ 图片」按钮:弹出系统的选文件窗口,只让选 PNG / JPG。
+    /// 「＋ 文件」按钮:弹出系统的选文件窗口,什么文件都能选。
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
-        panel.allowedContentTypes = [.png, .jpeg]
         panel.beginSheetModal(for: window) { response in
             completionHandler(response == .OK ? panel.urls : nil)
         }

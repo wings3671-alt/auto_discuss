@@ -97,7 +97,13 @@ class ServerCase(unittest.TestCase):
         self.assertEqual(self.json("POST", "/api/discussions", raw=b"not json")[0], 400)
         self.assertEqual(self.json("GET", "/api/nothing")[0], 404)
         sid = self.json("POST", "/api/discussions", {"title": "x"})[1]["id"]
-        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/attachments", raw=b"%PDF")[0], 415)
+        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/attachments", raw=b"")[0], 400)
+        status, saved = self.json("POST", f"/api/discussions/{sid}/attachments", raw=b"%PDF",
+                                  headers={"X-Filename": urllib.parse.quote("报价.pdf")})
+        self.assertEqual((status, saved["label"], saved["image"]), (200, "报价.pdf", False))
+        self.assertEqual(self.call("GET", f"/api/discussions/{sid}/files/{saved['name']}")[0], 404)
+        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/reveal", {"name": saved["name"]})[0], 200)
+        self.assertEqual(self.json("POST", f"/api/discussions/{sid}/reveal", {"name": "没有.pdf"})[0], 404)
         self.assertEqual(self.json("POST", f"/api/discussions/{sid}/explode")[0], 404)
 
     def test_requests_from_other_sites_are_refused(self):

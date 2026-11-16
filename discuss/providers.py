@@ -70,7 +70,8 @@ class Reply:
 
 
 class Provider(Protocol):
-    sees_images: bool
+    sees_images: bool    # 能不能看用户附的图片
+    reads_files: bool    # 有没有读文件的工具,能不能打开用户附的文件
     assignable: bool     # 能不能被派活(动手改文件、跑命令);不能的只发言
 
     def run(self, request: Request) -> Reply: ...
@@ -175,6 +176,7 @@ def _with_login_hint(message: str, hint: str) -> str:
 # ── Claude Code ─────────────────────────────────────────────────────────────
 class Claude:
     sees_images = True
+    reads_files = True
     assignable = True
     _LOGIN_HINT = "看起来是登录问题:请打开终端运行 claude,输入 /login 重新登录后再点重试。"
     _TOOL_STATUS = {"Read": "正在查看文件", "Glob": "正在查找文件", "Grep": "正在检索内容",
@@ -257,6 +259,7 @@ class Claude:
 # ── Codex ───────────────────────────────────────────────────────────────────
 class Codex:
     sees_images = True
+    reads_files = True
     assignable = False
     _LOGIN_HINT = "看起来是登录问题:请打开终端运行 codex login 重新登录后再点重试。"
     _ITEM_STATUS = {"reasoning": "正在思考", "command_execution": "正在查看文件",
@@ -339,6 +342,7 @@ def _codex_context(thread: str, env: dict[str, str]) -> tuple[int, int]:
 # ── 本地模型(Ollama)────────────────────────────────────────────────────────
 class Ollama:
     sees_images = False
+    reads_files = False
     assignable = False
 
     def __init__(self, member: Member) -> None:
@@ -388,6 +392,7 @@ class Ollama:
 # ── 任意命令行工具:提示词从标准输入进,回复从标准输出出 ───────────────────────
 class Command:
     sees_images = False
+    reads_files = False
     assignable = False
 
     def __init__(self, member: Member) -> None:

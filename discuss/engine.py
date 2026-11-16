@@ -33,13 +33,15 @@ from .providers import Provider, ProviderError, Reply, Request, TurnCancelled
 log = logging.getLogger("discuss")
 
 _EXTEND_BY = 6                      # 到达轮数上限后,一次延长几轮
-_MAX_IMAGE_BYTES = 15 * 1024 * 1024
+_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+_MAX_AVATAR_BYTES = 15 * 1024 * 1024
 _IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg"}
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 _EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
                "/usr/bin", "/bin"]
 _UNSAFE_NAME_RE = re.compile(r'[\\/:*?"<>|\s\x00-\x1f]+')
-_UNSAFE_IMAGE_NAME_RE = re.compile(r"[^\w\-]+")
+_UNSAFE_ATTACHMENT_NAME_RE = re.compile(r"[^\w\-]+")
+_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,10}")
 _PHASE_VIEW = {Phase.NEW: "new", Phase.ACTIVE: "paused", Phase.USER: "user", Phase.DONE: "done"}
 
 
@@ -104,6 +106,15 @@ class Session:
         self.job = ""                     # turn(发言)/ tidy(整理白板)
         self.live: Live | None = None
         self.error = ""                   # 上一棒失败的原因,给用户看
+
+
+@dataclass
+class Attached:
+    """用户附给 AI 看的东西,都在这场讨论的附件夹里。"""
+
+    images: list[Path]            # 最近一次发言附的图片
+    files: list[Path]             # 最近一次发言附的文件
+    earlier_files: list[Path]     # 更早的发言里附过的文件
 
 
 def _reveal_in_finder(path: Path) -> None:
@@ -198,7 +209,11 @@ class Engine:
                 and os.path.ismount(self.settings.nas_mount)}
 
     def attachment(self, sid: str, name: str) -> Path:
-        return _existing_child(self._session(sid).attachments, name)
+        """界面要显示的附图。只给图片:别的附件不经网页送出,免得里面的网页脚本在界面里运行。"""
+        path = _existing_child(self._session(sid).attachments, name)
+        if path.suffix[1:] not in _IMAGE_TYPES.values():
+            raise EngineError("找不到这个文件。", 404)
+        return path
 
     def avatar(self, name: str) -> Path:
         return _existing_child(self.paths.avatars, name)
@@ -397,21 +412,40 @@ class Engine:
         self._reveal(target)
         return str(target)
 
-    def attach(self, sid: str, filename: str, data: bytes) -> dict[str, str]:
-        """保存一张附图,返回可以插进发言的 Markdown。只收 PNG / JPG。"""
+    def attach(self, sid: str, filename: str, data: bytes) -> dict[str, Any]:
+        """保存用户附的一份文件,返回可以插进发言的 Markdown。
+
+        PNG / JPG 算图片:界面里直接显示,AI 当图看。其余算文件:界面里是一枚文件签,
+        AI 用读文件工具打开。存下来的文件名只留字母、数字、汉字,不带空格和括号。"""
         session = self._session(sid)
-        extension = _image_type(data)
-        stem = _UNSAFE_IMAGE_NAME_RE.sub("_", Path(filename).stem).strip("_")[:30] or "图片"
+        if not data:
+            raise EngineError("这是个空文件。")
+        if len(data) > _MAX_ATTACHMENT_BYTES:
+            raise EngineError("文件太大了(上限 50 MB)。", 413)
+        original = Path(filename)
+        image = _image_extension(data)
+        extension = f".{image}" if image else original.suffix.lower()
+        stem = _UNSAFE_ATTACHMENT_NAME_RE.sub("_", original.stem).strip("_")[:30] \
+            or ("图片" if image else "文件")
+        label = stem if image else stem + (extension if _EXTENSION_RE.fullmatch(extension) else "")
         session.attachments.mkdir(exist_ok=True)
-        target = _free_name(
-            session.attachments / f"{datetime.now():%H%M%S}_{stem}.{extension}")
+        target = _free_name(session.attachments / f"{datetime.now():%H%M%S}_{label}"
+                            f"{extension if image else ''}")
         target.write_bytes(data)
-        return {"name": target.name,
-                "markdown": f"![{stem}]({session.attachments.name}/{target.name})"}
+        link = f"[{label}]({session.attachments.name}/{target.name})"
+        return {"name": target.name, "label": label, "image": bool(image),
+                "markdown": f"!{link}" if image else link}
+
+    def reveal(self, sid: str, name: str) -> None:
+        """在访达里显示这场讨论的一份附件。"""
+        self._reveal(_existing_child(self._session(sid).attachments, name))
 
     def set_avatar(self, member_id: str, data: bytes) -> str:
         member = self._member_or_user(member_id)
-        name = f"{member_id}_{datetime.now():%Y%m%d%H%M%S}.{_image_type(data)}"
+        extension = _image_extension(data)
+        if not extension or len(data) > _MAX_AVATAR_BYTES:
+            raise EngineError("头像只接受 PNG 和 JPG 图片,最大 15 MB。", 415)
+        name = f"{member_id}_{datetime.now():%Y%m%d%H%M%S}.{extension}"
         (self.paths.avatars / name).write_bytes(data)
         member.image = name
         save_settings(self.paths.settings, self.settings)
@@ -552,7 +586,7 @@ class Engine:
         self._backup(session)
         board = self._board(session)
         provider = self._make_provider(member)
-        attached = self._images(session, doc)
+        attached = self._attached(session, doc)
         hands_on = status.assignee == member.id
         speeches = {m.speaker: m.text for m in doc.messages if m.kind == "ai"}   # 各人最近一次发言
         context = prompts.TurnContext(
@@ -562,14 +596,17 @@ class Engine:
                     if other != member.id and other in speeches],
             user_name=self.settings.user.name,
             user_text=next((m.text for m in reversed(doc.messages) if m.kind == "user"), ""),
-            image_paths=[str(path) for path in attached],
+            image_paths=[str(path) for path in attached.images],
             can_see_images=provider.sees_images,
+            file_paths=[str(path) for path in attached.files],
+            earlier_file_paths=[str(path) for path in attached.earlier_files],
+            can_read_files=provider.reads_files,
             assignee=self._name(status.assignee) if status.assignee else "",
             hands_on=hands_on,
             own_text=speeches.get(member.id, "") if hands_on else "",
             protected=[str(folder) for folder in self.paths.protected] if hands_on else [])
         reply, ops, problem = self._ask(session, member, provider, prompts.turn(context),
-                                        board, attached if provider.sees_images else [],
+                                        board, attached.images if provider.sees_images else [],
                                         status="正在干活" if hands_on else "", hands_on=hands_on)
         body, _ = whiteboard.split_reply(reply.text)
         if not body:
@@ -763,15 +800,23 @@ class Engine:
         except EngineError as err:
             return whiteboard.Board(), str(err)
 
-    def _images(self, session: Session, doc: Document) -> list[Path]:
-        """用户最近一次发言(还没发过言则是议题)里引用的、确实存在的附图。"""
-        source = next((m.text for m in reversed(doc.messages) if m.kind in ("user", "topic")), "")
-        found = []
-        for relative in document.image_paths(source):
-            path = (self.paths.discussions / relative).resolve()
-            if path.parent == session.attachments.resolve() and path.is_file():
-                found.append(path)
-        return found
+    def _attached(self, session: Session, doc: Document) -> Attached:
+        """用户附给 AI 看的图片和文件。图片只算最近一次发言(还没发过言则是议题)附的;
+        文件另外带上更早附过的,因为一份资料往往要讨论好几回。"""
+        folder = session.attachments.resolve()
+
+        def existing(relatives: list[str]) -> list[Path]:
+            """这些路径里,确实是本场附件夹里的文件的那些(去掉重复)。"""
+            paths = [(self.paths.discussions / relative).resolve() for relative in relatives]
+            return [path for path in dict.fromkeys(paths)
+                    if path.parent == folder and path.is_file()]
+
+        said = [m.text for m in doc.messages if m.kind in ("user", "topic")]    # 从早到晚
+        latest = said[-1] if said else ""
+        files = existing(document.file_paths(latest))
+        earlier = existing([path for text in said[:-1] for path in document.file_paths(text)])
+        return Attached(images=existing(document.image_paths(latest)), files=files,
+                        earlier_files=[path for path in earlier if path not in files])
 
     def _backup(self, session: Session) -> None:
         """改动前留一份回滚点,每场讨论只保留最近若干份。"""
@@ -815,13 +860,10 @@ def _after(status: Status) -> Status:
     return replace(status, phase=Phase.USER, turn=USER_ID, assignee="", updated=_now())
 
 
-def _image_type(data: bytes) -> str:
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise EngineError("图片太大了(上限 15 MB)。", 413)
-    for magic, extension in _IMAGE_TYPES.items():
-        if data.startswith(magic):
-            return extension
-    raise EngineError("暂不支持这种文件。目前只接受 PNG 和 JPG 图片。", 415)
+def _image_extension(data: bytes) -> str:
+    """内容是 PNG / JPG 就返回扩展名,否则返回空串。只看文件内容,不信文件名。"""
+    return next((extension for magic, extension in _IMAGE_TYPES.items()
+                 if data.startswith(magic)), "")
 
 
 def _free_name(path: Path) -> Path:

@@ -50,6 +50,7 @@ _TRAILING_RULE_RE = re.compile(r"(?:\A|\n)\s*-{3,}\s*\Z")     # 段落末尾的�
 _RESERVED_LINE_RE = re.compile(
     r"^<!--(?=\s*(?:TURN|USER_TURN_START|USER_TURN_END|NOTE|AUTO_DISCUSS)\b)", re.M)
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+FILE_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)\)")
 
 _DOTS = {"CLAUDE": "🟡", "CODEX": "🟢", USER_ID: "🔴"}
 _TOPIC_HINT = "在下面写下你想讨论的问题"
@@ -246,6 +247,11 @@ def _user_text(body: str, legacy: bool) -> str:
 def image_paths(text: str) -> list[str]:
     """发言里用 ![名称](路径) 引用的图片路径。"""
     return IMAGE_RE.findall(text)
+
+
+def file_paths(text: str) -> list[str]:
+    """发言里用 [名称](路径) 引用的文件路径。普通网址链接也是这个写法,要哪些由调用者筛。"""
+    return FILE_RE.findall(text)
 
 
 # ── 写 ──────────────────────────────────────────────────────────────────────

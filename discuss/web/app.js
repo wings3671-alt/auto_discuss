@@ -14,7 +14,7 @@ const state = {
   settings: null,
   matches: null,       // 搜索结果:讨论 → 命中的上下文;没在搜索时为 null
   drafts: new Map(),   // 讨论 → 没发出去的文字
-  images: new Map(),   // 讨论 → 已上传、待随发言发出的附图
+  attachments: new Map(),   // 讨论 → 已上传、待随发言发出的附件(图片和文件)
   sending: false,
   phases: new Map(),   // 讨论 → 上次看到的状态,用来发现"轮到你了"
 };
@@ -39,7 +39,7 @@ const api = {
   create: (title) => call("POST", "/api/discussions", { title }),
   send: (id, body) => call("POST", `${at(id)}/send`, body),
   act: (id, action, body = {}) => call("POST", `${at(id)}/${action}`, body),
-  attach: (id, file) => call("POST", `${at(id)}/attachments`, file, { "X-Filename": enc(file.name || "图片") }),
+  attach: (id, file) => call("POST", `${at(id)}/attachments`, file, { "X-Filename": enc(file.name || "附件") }),
   search: (query) => call("GET", `/api/search?q=${enc(query)}`),
   exportFile: (id, html) => call("POST", `${at(id)}/export`, new Blob([html], { type: "text/html" })),
   settings: () => call("GET", "/api/settings"),
@@ -60,7 +60,9 @@ function chineseNumber(n) {
   return String(n);
 }
 
-const tokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
+// 1234 → 1.2k、56789 → 57k、1000000 → 1M
+const tokens = (n) => (n >= 999500 ? `${Number((n / 1e6).toFixed(1))}M`
+  : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 const pad = (n) => String(n).padStart(2, "0");
 
 function clock(iso) {
@@ -235,7 +237,7 @@ function messageHtml(message, index) {
   if (message.kind === "note") return `<div class="notice">${esc(message.text)}</div>`;
   const mine = message.kind !== "ai";
   const who = mine ? person("USER") : { ...person(message.speaker), name: nameOf(message.speaker) || message.name };
-  const { html, links } = renderMarkdown(message.text, { resolveImage: imageUrl });
+  const { html, links } = renderMarkdown(message.text, { resolveImage: imageUrl, resolveFile: attachmentName });
   const label = message.kind === "topic" ? "议题" : clock(message.time);
   const bubble = message.text.trim()
     ? `<div class="bub md">${html}</div>`
@@ -252,11 +254,17 @@ function messageHtml(message, index) {
     ${bubble}${cards}${tags.length ? `<div class="foot">${tags.join("")}</div>` : ""}</div></div>`;
 }
 
-// 发言里引用的附图 → 能在界面里显示的地址;不是本讨论附件夹里的图片一律不显示
-function imageUrl(path) {
+// 发言里引用的路径如果指向本讨论的附件夹,给出附件的文件名;否则是 null
+function attachmentName(path) {
   const prefix = `${state.view.attachments}/`;
   const name = path.startsWith(prefix) ? path.slice(prefix.length) : "";
-  return name && !name.includes("/") ? `${at(state.view.id)}/files/${enc(name)}` : null;
+  return name && !name.includes("/") ? name : null;
+}
+
+// 发言里引用的附图 → 能在界面里显示的地址;不是本讨论附件夹里的图片一律不显示
+function imageUrl(path) {
+  const name = attachmentName(path);
+  return name ? `${at(state.view.id)}/files/${enc(name)}` : null;
 }
 
 function linkCard(url) {
@@ -375,8 +383,8 @@ function buildComposer() {
       <textarea id="input" rows="3"></textarea>
       <div class="thumbs" id="thumbs" hidden></div>
       <div class="bar">
-        <button class="btn" data-act="pick">＋ 图片</button>
-        <input type="file" id="picker" accept="image/png,image/jpeg" multiple hidden>
+        <button class="btn" data-act="pick">＋ 文件</button>
+        <input type="file" id="picker" multiple hidden>
         <select class="btn" id="assignee" title="这一回只讨论,还是把活派给一位成员" hidden></select>
         <span class="hint" id="hint"></span>
         <button class="btn danger" data-act="finish">收工</button>
@@ -394,17 +402,29 @@ function buildComposer() {
   });
   input.addEventListener("paste", (event) => {
     const files = [...event.clipboardData.files];
-    if (files.length) { event.preventDefault(); addImages(files); }
+    if (files.length) { event.preventDefault(); addFiles(files); }
   });
-  $("picker").addEventListener("change", (event) => { addImages([...event.target.files]); event.target.value = ""; });
+  $("picker").addEventListener("change", (event) => { addFiles([...event.target.files]); event.target.value = ""; });
   $("assignee").addEventListener("change", () => updateAssignee());
+  acceptDroppedFiles();
+}
+
+// 文件拖到窗口任何位置都收进输入区。同时拦住浏览器的默认做法:它会把拖进来的文件直接打开,顶掉整个界面
+function acceptDroppedFiles() {
   const box = $("box");
-  box.addEventListener("dragover", (event) => { event.preventDefault(); box.classList.add("drop"); });
-  box.addEventListener("dragleave", () => box.classList.remove("drop"));
-  box.addEventListener("drop", (event) => {
+  const carriesFiles = (event) => [...event.dataTransfer.types].includes("Files");
+  let fading;
+  document.addEventListener("dragover", (event) => {
+    if (!carriesFiles(event)) return;
     event.preventDefault();
-    box.classList.remove("drop");
-    addImages([...event.dataTransfer.files]);
+    box.classList.add("drop");
+    clearTimeout(fading);
+    fading = setTimeout(() => box.classList.remove("drop"), 150);     // 拖走了就自己熄灭
+  });
+  document.addEventListener("drop", (event) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    if (state.view) addFiles([...event.dataTransfer.files]);
   });
 }
 
@@ -435,7 +455,7 @@ function updateComposer({ switched = false } = {}) {
 }
 
 // 派活选择:这一回只讨论,还是把活派给一位能动手的成员。选项没变就不重画,免得打断正在选的人
-const HINT = "可直接粘贴文字;图片可拖入或粘贴,只接受 PNG / JPG · ⌘↩ 发送";
+const HINT = "文件和图片可以直接拖进来,也可以粘贴 · ⌘↩ 发送";
 
 function updateAssignee({ reset = false } = {}) {
   const picker = $("assignee");
@@ -461,7 +481,7 @@ function updateButtons() {
   const view = state.view;
   if (!view) return;
   const mode = COMPOSER[view.phase];
-  const hasContent = Boolean($("input").value.trim()) || (state.images.get(view.id) || []).length > 0;
+  const hasContent = Boolean($("input").value.trim()) || (state.attachments.get(view.id) || []).length > 0;
   const cannotInterrupt = mode.interrupt && (view.job !== "turn" || !hasContent);
   const sendButton = document.querySelector('[data-act="send"]');
   sendButton.textContent = mode.primary;
@@ -471,26 +491,23 @@ function updateButtons() {
   finishButton.disabled = state.sending;
 }
 
+// 待发的附件:图片显示缩略图,其余显示一枚文件签
 function renderThumbs() {
-  const images = state.images.get(state.id) || [];
+  const attachments = state.attachments.get(state.id) || [];
   const thumbs = $("thumbs");
-  thumbs.hidden = !images.length;
-  thumbs.innerHTML = images.map((image, index) => `<div class="thumb">
-    <img src="${at(state.id)}/files/${enc(image.name)}" alt="">
+  thumbs.hidden = !attachments.length;
+  thumbs.innerHTML = attachments.map((attachment, index) => `<div class="thumb${attachment.image ? "" : " file"}">
+    ${attachment.image ? `<img src="${at(state.id)}/files/${enc(attachment.name)}" alt="">` : `<span>${esc(attachment.label)}</span>`}
     <button data-act="unpick" data-index="${index}" title="移除">×</button></div>`).join("");
 }
 
-async function addImages(files) {
+async function addFiles(files) {
   const id = state.id;
   for (const file of files) {
-    if (!["image/png", "image/jpeg"].includes(file.type)) {
-      toast(`暂不支持「${file.name}」。目前只接受 PNG 和 JPG 图片。`);
-      continue;
-    }
     try {
       const saved = await api.attach(id, file);
-      state.images.set(id, [...(state.images.get(id) || []), saved]);
-    } catch (error) { toast(error.message); }
+      state.attachments.set(id, [...(state.attachments.get(id) || []), saved]);
+    } catch (error) { toast(`「${file.name}」没加上:${error.message}`); }
   }
   if (id === state.id) updateComposer();
 }
@@ -500,9 +517,9 @@ async function send({ finish = false, extend = false } = {}) {
   if (!view || state.sending) return;
   const interrupt = Boolean(COMPOSER[view.phase].interrupt);
   const typed = $("input").value.trim();
-  const images = state.images.get(view.id) || [];
-  if (view.phase === "paused" && !finish && !typed && !images.length) { act("resume"); return; }
-  const text = [typed, ...images.map((image) => image.markdown)].filter(Boolean).join("\n\n");
+  const attachments = state.attachments.get(view.id) || [];
+  if (view.phase === "paused" && !finish && !typed && !attachments.length) { act("resume"); return; }
+  const text = [typed, ...attachments.map((attachment) => attachment.markdown)].filter(Boolean).join("\n\n");
   state.sending = true;
   updateComposer();
   try {
@@ -516,7 +533,7 @@ async function send({ finish = false, extend = false } = {}) {
     $("input").value = "";
     autosize();
     state.drafts.delete(view.id);
-    state.images.delete(view.id);
+    state.attachments.delete(view.id);
     $("assignee").value = "";                               // 派活只管这一回,下一回默认只讨论
     await refreshView({ toEnd: true });
   } catch (error) {
@@ -591,7 +608,7 @@ async function open(id) {
 }
 
 // ── 操作 ──────────────────────────────────────────────────────────────────
-const act = guarded(async (action) => { await api.act(state.id, action); });
+const act = guarded(async (action, body) => { await api.act(state.id, action, body); });
 
 function newDiscussion() {
   dialog({
@@ -831,7 +848,7 @@ const ACTIONS = {
   finish: () => send({ finish: true }),
   pick: () => $("picker").click(),
   unpick: (target) => {
-    state.images.get(state.id).splice(Number(target.dataset.index), 1);
+    state.attachments.get(state.id).splice(Number(target.dataset.index), 1);
     updateComposer();
   },
   menu: (target) => {
@@ -852,6 +869,8 @@ const ACTIONS = {
 document.addEventListener("click", (event) => {
   const image = event.target.closest("img.pic");
   if (image) { zoom(image.src); return; }
+  const file = event.target.closest("button.file");                 // 发言里的文件签:在访达里显示那份文件
+  if (file) { act("reveal", { name: file.dataset.file }); return; }
   const target = event.target.closest("[data-act]");
   if (target && ACTIONS[target.dataset.act] && !target.closest(".set")) ACTIONS[target.dataset.act](target);
 });
