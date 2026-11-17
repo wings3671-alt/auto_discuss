@@ -8,6 +8,15 @@ import UniformTypeIdentifiers
 import UserNotifications
 import WebKit
 
+/// 显示界面的网页视图。
+///
+/// 网页铺满整个窗口,连原来标题栏的位置也盖住了;而网页视图默认告诉系统"按在我身上不能拖窗口",
+/// 窗口就拖不动了。这里改口说"可以"。它只在标题栏那一条起作用(拖动、双击放大都交还给系统),
+/// 再往下照旧是网页自己的点击和选字 —— 所以界面在最上面那一条里不放能点的东西。
+final class PageView: WKWebView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                          WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
@@ -32,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         config.userContentController.addUserScript(WKUserScript(
             source: "document.documentElement.classList.add('window-glass')",
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        web = WKWebView(frame: .zero, configuration: config)
+        web = PageView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
         web.setValue(false, forKey: "drawsBackground")       // 网页透明的地方,透出下面的毛玻璃
@@ -46,8 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         web.autoresizingMask = [.width, .height]
         glass.addSubview(web)
 
-        // 不要单独的标题栏:内容顶到窗口最上沿,红黄绿三个按钮浮在界面上。
-        // 最上面那一条仍然归系统管(拖动窗口、双击放大),所以界面在那里不放能点的东西
+        // 不要单独的标题栏:内容顶到窗口最上沿,红黄绿三个按钮浮在界面上
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 840),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
