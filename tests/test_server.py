@@ -55,6 +55,13 @@ class ServerCase(unittest.TestCase):
             self.assertTrue(payload)
         self.assertEqual(self.call("GET", "/web/../config.py")[0], 404)
 
+    def test_page_opens_in_the_chosen_theme(self):
+        self.assertIn(b'<html data-theme="ink" lang="zh-CN">', self.call("GET", "/")[2])
+        settings = self.json("GET", "/api/settings")[1]
+        settings["theme"] = "slate"
+        self.json("PUT", "/api/settings", settings)
+        self.assertIn(b'<html data-theme="slate" lang="zh-CN">', self.call("GET", "/")[2])
+
     def test_whole_discussion_over_http(self):
         status, created = self.json("POST", "/api/discussions", {"title": "遮阳棚"})
         sid = created["id"]

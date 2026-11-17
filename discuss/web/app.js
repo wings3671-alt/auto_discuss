@@ -118,7 +118,8 @@ const guarded = (work) => async (...args) => {
 };
 
 // ── 对话框 ────────────────────────────────────────────────────────────────
-function dialog({ title, body, actions, large = false }) {
+// onClose:不管怎么关的(按钮、Esc、点空白处),关掉时都要做的事
+function dialog({ title, body, actions, large = false, onClose }) {
   const veil = document.createElement("div");
   veil.className = "veil";
   veil.innerHTML = `<div class="dialog${large ? " large" : ""}"><header>${esc(title)}</header>
@@ -126,7 +127,7 @@ function dialog({ title, body, actions, large = false }) {
   const content = veil.querySelector(".content");
   if (typeof body === "string") content.innerHTML = body; else content.append(body);
   const footer = veil.querySelector("footer");
-  const close = () => { veil.remove(); document.removeEventListener("keydown", onKey); };
+  const close = () => { veil.remove(); document.removeEventListener("keydown", onKey); onClose?.(); };
   const problem = (message) => { footer.querySelector(".problem").textContent = message; };
   for (const action of actions) {
     const button = document.createElement("button");
@@ -491,9 +492,10 @@ function updateAssignee({ reset = false } = {}) {
   picker.hidden = !options;
   const assignee = picker.value;
   $("box").classList.toggle("assigning", Boolean(assignee));
-  $("hint").textContent = assignee
+  const hint = assignee
     ? `这一回 ${nameOf(assignee)} 可以改文件、跑命令;删除、覆盖这类事它会先问你。其他成员只审查。`
     : HINT;
+  Object.assign($("hint"), { textContent: hint, title: hint });     // 窗口窄时会截断,鼠标停上去看全文
 }
 
 // 发送 / 收工按钮此刻能不能点(每敲一个字都会重新判断)
@@ -707,18 +709,19 @@ const exportDiscussion = guarded(async (id) => {
   toast(`已导出到「下载」文件夹:${path.split("/").pop()}`);
 });
 
-// ── 外观:主题、字号、你的气泡颜色 ───────────────────────────────────────────
+// ── 外观:配色、字号、讨论目录收没收起 ───────────────────────────────────────
+// 四套配色从深到浅,最浅的也只到中等亮度(大面积的亮色伤眼,所以没有浅色)
+const THEMES = [["ink", "墨 · 暖调深色"], ["night", "夜 · 冷调深色"], ["slate", "黛 · 中深青灰"], ["clay", "陶 · 中等暖灰"]];
 const ZOOM = { small: 0.9, medium: 1, large: 1.12, xlarge: 1.25 };
 
 function applyAppearance() {
   const { theme, text_size: size, list_hidden: hidden } = state.settings;
-  const root = document.documentElement;
-  if (theme === "auto") root.removeAttribute("data-theme"); else root.dataset.theme = theme;
+  document.documentElement.dataset.theme = theme;
   document.querySelector(".app").classList.toggle("list-hidden", hidden);
   Object.assign($("foldButton"), hidden ? { textContent: "›", title: "展开讨论目录" }
     : { textContent: "‹", title: "收起讨论目录(不让旁人看到聊过什么)" });
   const zoom = ZOOM[size] ?? 1;
-  if (window.webkit?.messageHandlers?.app) tellApp({ type: "appearance", theme, zoom });
+  if (window.webkit?.messageHandlers?.app) tellApp({ type: "zoom", zoom });
   else document.body.style.zoom = zoom;                     // 在普通浏览器里的替代做法
 }
 
@@ -782,8 +785,8 @@ function openSettings() {
       <div class="tip" style="margin-left:0">成员名单只影响之后新建的讨论。其他有订阅版命令行工具的模型,用「命令行工具」接入。</div>
 
       <h4>外观</h4>
-      <div class="line"><span>主题</span><select class="field num" data-setting="theme" style="width:170px">
-        ${[["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([value, label]) => `<option value="${value}"${draft.theme === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>
+      <div class="line"><span>配色</span><select class="field num" data-setting="theme" style="width:170px">
+        ${THEMES.map(([value, label]) => `<option value="${value}"${draft.theme === value ? " selected" : ""}>${label}</option>`).join("")}</select><span class="state">选了立刻预览,点「保存」才算数</span></div>
       <div class="line"><span>字号</span><select class="field num" data-setting="text_size" style="width:170px">
         ${[["small", "小"], ["medium", "标准"], ["large", "大"], ["xlarge", "特大"]].map(([value, label]) => `<option value="${value}"${draft.text_size === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>
       <div class="tip">每个人发言笺的颜色就是他头像的底色,在上面成员那一栏里改。</div>
@@ -825,6 +828,7 @@ function openSettings() {
       if (["avatar", "color"].includes(field.dataset.key)) row.querySelector("[data-act=avatar]").innerHTML = avatar(who);
     } else if (field.dataset.setting) {
       draft[field.dataset.setting] = value;
+      if (field.dataset.setting === "theme") document.documentElement.dataset.theme = value;   // 先看看效果
     }
   });
   form.addEventListener("click", guarded(async (event) => {
@@ -867,6 +871,7 @@ function openSettings() {
   render();
   dialog({
     title: "设置", body: form, large: true,
+    onClose: applyAppearance,                                      // 预览过的配色:没保存就恢复原样
     actions: [{ label: "取消" }, {
       label: "保存", kind: "primary",
       run: async () => { state.settings = await api.saveSettings(draft); applyAppearance(); await refreshView(); },

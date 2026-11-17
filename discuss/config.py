@@ -12,7 +12,7 @@ from typing import Any
 USER_ID = "USER"
 MEMBER_ID_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,15}$")
 AI_KINDS = ("claude", "codex", "ollama", "command")
-THEMES = ("auto", "light", "dark")
+THEMES = ("ink", "night", "slate", "clay")     # 配色,从深到浅:墨 / 夜 / 黛 / 陶。没有浅色——亮色伤眼
 TEXT_SIZES = ("small", "medium", "large", "xlarge")
 LIST_GROUPS = ("pinned", "active", "done")     # 讨论目录里的三组:置顶 / 进行中 / 已收工
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -161,7 +161,7 @@ class Settings:
     hands_on_folders: list[str] = field(default_factory=list)   # 动手时,主目录之外还能写的文件夹
     whiteboard_limit: int = 10000           # 白板超过这么多 token 就提示整理
     keep_backups: int = 10
-    theme: str = "auto"                     # 外观:auto(跟随系统)/ light / dark
+    theme: str = "ink"                      # 配色,取值见 THEMES
     text_size: str = "medium"               # 字号:small / medium / large / xlarge
     list_hidden: bool = False               # 整个讨论目录收起(不想让旁人看到聊过什么)
     folded_groups: list[str] = field(default_factory=list)   # 目录里收起的组,取值见 LIST_GROUPS

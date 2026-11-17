@@ -2,7 +2,7 @@
 
 const EXTRA_CSS = `
   html, body { height: auto; }
-  body { overflow: auto; }
+  body { overflow: auto; background: var(--bg); }
   .export { max-width: 860px; margin: 0 auto; padding: 32px 22px 64px; }
   .export > h1 { font: 700 26px/1.4 var(--serif); margin: 0 0 4px; }
   .export > .sub { color: var(--sub); font-size: 13px; margin-bottom: 8px; }

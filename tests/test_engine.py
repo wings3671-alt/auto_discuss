@@ -568,9 +568,12 @@ class Extras(EngineCase):
                         {"id": "LOCAL", "name": "千问", "kind": "ollama", "model": "qwen3"}]})
         settings = self.engine.settings
         self.assertEqual((settings.port, settings.max_rounds, settings.notify), (8765, 12, True))
-        self.assertEqual((settings.theme, settings.text_size), ("auto", "medium"))
-        self.engine.update_settings({"theme": "dark", "text_size": "huge"})
-        self.assertEqual((self.engine.settings.theme, self.engine.settings.text_size), ("dark", "medium"))
+        self.assertEqual((settings.theme, settings.text_size), ("ink", "medium"))
+        self.engine.update_settings({"theme": "slate", "text_size": "huge"})
+        self.assertEqual((self.engine.settings.theme, self.engine.settings.text_size), ("slate", "medium"))
+        for gone in ("light", "auto", "dark"):                         # 浅色和"跟随系统"已经取消:一律落回默认的深色
+            self.engine.update_settings({"theme": gone})
+            self.assertEqual(self.engine.settings.theme, "ink")
         self.assertEqual((self.engine.settings.list_hidden, self.engine.settings.folded_groups), (False, []))
         self.engine.update_settings({"list_hidden": True, "folded_groups": ["done", "没有这一组", 3, "pinned"]})
         self.assertEqual((self.engine.settings.list_hidden, self.engine.settings.folded_groups),

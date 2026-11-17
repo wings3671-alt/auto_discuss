@@ -93,7 +93,7 @@ def _handler_for(engine: Engine) -> type[BaseHTTPRequestHandler]:
         # ── 路由 ────────────────────────────────────────────────────────────
         def _get(self, parts: list[str]) -> None:
             if not parts:
-                return self._file(WEB_DIR / "index.html")
+                return self._page()
             if parts[0] == "web" and len(parts) == 2:
                 return self._file(WEB_DIR / Path(parts[1]).name)
             if parts[0] != "api":
@@ -186,6 +186,12 @@ def _handler_for(engine: Engine) -> type[BaseHTTPRequestHandler]:
         def _json(self, data: Any, code: int = 200) -> None:
             self._send(code, "application/json; charset=utf-8",
                        json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+        def _page(self) -> None:
+            """界面的骨架。配色直接写在里面:一打开就是用户选的那套,不会先闪一下默认的。"""
+            page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+            page = page.replace("<html ", f'<html data-theme="{engine.settings.theme}" ', 1)
+            self._send(200, "text/html; charset=utf-8", page.encode("utf-8"))
 
         def _file(self, path: Path) -> None:
             if not path.is_file():

@@ -28,16 +28,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func buildWindow() {
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "app")
+        // 告诉界面:窗口底下垫着系统毛玻璃。界面据此把自己的底色让出来,并在顶上空出一条
+        config.userContentController.addUserScript(WKUserScript(
+            source: "document.documentElement.classList.add('window-glass')",
+            injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
+        web.setValue(false, forKey: "drawsBackground")       // 网页透明的地方,透出下面的毛玻璃
 
+        // 整个窗口垫一层系统毛玻璃(能透出桌面和后面的窗口),网页铺在它上面
+        let glass = NSVisualEffectView()
+        glass.material = .underWindowBackground
+        glass.blendingMode = .behindWindow
+        glass.state = .active                                // 窗口不在最前面时也保持毛玻璃,不变成一片灰
+        web.frame = glass.bounds
+        web.autoresizingMask = [.width, .height]
+        glass.addSubview(web)
+
+        // 不要单独的标题栏:内容顶到窗口最上沿,红黄绿三个按钮浮在界面上。
+        // 最上面那一条仍然归系统管(拖动窗口、双击放大),所以界面在那里不放能点的东西
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 840),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "胡说八道群"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.appearance = NSAppearance(named: .darkAqua)   // 界面没有浅色:毛玻璃和三个按钮固定用深色那一套
         window.minSize = NSSize(width: 760, height: 520)
-        window.contentView = web
+        window.contentView = glass
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.center()
@@ -102,10 +121,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             .replacingOccurrences(of: "<", with: "&lt;")
         web.loadHTMLString("""
             <meta charset="utf-8"><style>
-            body { font: 14px -apple-system, "PingFang SC"; color: #77736a; background: #f3f1ec;
+            body { font: 14px -apple-system, "PingFang SC"; color: #55524b;
                    display: grid; place-items: center; height: 100vh; margin: 0; white-space: pre-wrap;
                    text-align: center; padding: 40px; box-sizing: border-box; }
-            @media (prefers-color-scheme: dark) { body { background: #17181a; color: #9c9a94; } }
+            @media (prefers-color-scheme: dark) { body { color: #b4b1a9; } }
             </style>\(escaped)
             """, baseURL: nil)
     }
@@ -158,10 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             content.sound = .default
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
-        } else if type == "appearance" {
-            // 设置里选了浅色 / 深色就让整个窗口(连同标题栏)跟着变;"跟随系统"则不干预
-            let forced: [String: NSAppearance.Name] = ["light": .aqua, "dark": .darkAqua]
-            window.appearance = forced[body["theme"] as? String ?? ""].flatMap(NSAppearance.init(named:))
+        } else if type == "zoom" {                           // 设置里的字号
             web.pageZoom = CGFloat(body["zoom"] as? Double ?? 1)
         }
     }
