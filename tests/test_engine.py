@@ -571,6 +571,12 @@ class Extras(EngineCase):
         self.assertEqual((settings.theme, settings.text_size), ("auto", "medium"))
         self.engine.update_settings({"theme": "dark", "text_size": "huge"})
         self.assertEqual((self.engine.settings.theme, self.engine.settings.text_size), ("dark", "medium"))
+        self.assertEqual((self.engine.settings.list_hidden, self.engine.settings.folded_groups), (False, []))
+        self.engine.update_settings({"list_hidden": True, "folded_groups": ["done", "没有这一组", 3, "pinned"]})
+        self.assertEqual((self.engine.settings.list_hidden, self.engine.settings.folded_groups),
+                         (True, ["pinned", "done"]))
+        self.engine.update_settings({"list_hidden": "是", "folded_groups": "done"})
+        self.assertEqual((self.engine.settings.list_hidden, self.engine.settings.folded_groups), (False, []))
         self.assertEqual(settings.proxy, "")
         self.assertEqual([m.id for m in settings.members], ["LOCAL"])
         with self.assertRaises(EngineError):

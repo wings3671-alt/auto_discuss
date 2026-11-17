@@ -14,6 +14,7 @@ MEMBER_ID_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,15}$")
 AI_KINDS = ("claude", "codex", "ollama", "command")
 THEMES = ("auto", "light", "dark")
 TEXT_SIZES = ("small", "medium", "large", "xlarge")
+LIST_GROUPS = ("pinned", "active", "done")     # 讨论目录里的三组:置顶 / 进行中 / 已收工
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -162,6 +163,8 @@ class Settings:
     keep_backups: int = 10
     theme: str = "auto"                     # 外观:auto(跟随系统)/ light / dark
     text_size: str = "medium"               # 字号:small / medium / large / xlarge
+    list_hidden: bool = False               # 整个讨论目录收起(不想让旁人看到聊过什么)
+    folded_groups: list[str] = field(default_factory=list)   # 目录里收起的组,取值见 LIST_GROUPS
     user: Member = field(default_factory=default_user)
     members: list[Member] = field(default_factory=default_members)
 
@@ -186,6 +189,10 @@ class Settings:
             keep_backups=_int(raw.get("keep_backups"), base.keep_backups, 1, 100),
             theme=_choice(raw.get("theme"), THEMES, base.theme),
             text_size=_choice(raw.get("text_size"), TEXT_SIZES, base.text_size),
+            list_hidden=_bool(raw.get("list_hidden"), base.list_hidden),
+            folded_groups=[group for group in LIST_GROUPS
+                           if isinstance(raw.get("folded_groups"), list)
+                           and group in raw["folded_groups"]],
             user=user,
             members=_valid_members(raw.get("members")) or base.members,
         )

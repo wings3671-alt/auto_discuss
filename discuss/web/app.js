@@ -193,13 +193,18 @@ function renderList() {
       <div class="t">${row.pinned ? "📌 " : ""}${esc(row.title)}</div>
       <div class="m"><span class="dot ${row.phase}"></span><span class="meta">${esc(meta)}</span></div></button>`;
   };
+  const group = ([key, title, items]) => {
+    const folded = !state.matches && state.settings.folded_groups.includes(key);   // 搜索时一律展开,免得搜到了却看不见
+    return `<button class="group" data-act="foldGroup" data-group="${key}" title="${folded ? "展开" : "收起"}这一组">
+      <i>${folded ? "▸" : "▾"}</i>${title}<span class="count">${items.length}</span></button>${folded ? "" : items.map(item).join("")}`;
+  };
   const groups = [
-    ["置顶", rows.filter((row) => row.pinned)],
-    ["进行中", rows.filter((row) => !row.pinned && row.phase !== "done")],
-    ["已收工", rows.filter((row) => !row.pinned && row.phase === "done")],
-  ].filter(([, items]) => items.length);
+    ["pinned", "置顶", rows.filter((row) => row.pinned)],
+    ["active", "进行中", rows.filter((row) => !row.pinned && row.phase !== "done")],
+    ["done", "已收工", rows.filter((row) => !row.pinned && row.phase === "done")],
+  ].filter(([, , items]) => items.length);
   $("list").innerHTML = rows.length
-    ? groups.map(([title, items]) => `<div class="group">${title}</div>${items.map(item).join("")}`).join("")
+    ? groups.map(group).join("")
     : `<div class="empty-list">${state.matches ? "标题和发言里都没有找到。" : "还没有讨论。点上面的按钮新建一场。"}</div>`;
 }
 
@@ -581,11 +586,11 @@ function renderSide() {
       ${usage ? `<div class="row fine">每一棒都从头读起:这就是它最近一棒的全部占用,不会一轮轮累加。</div>` : ""}
       ${canTidy && over ? `<div class="actions"><button class="btn primary small" data-act="tidy">让 AI 整理白板</button></div>` : ""}
     </div>
-    <div class="sec">白板${canTidy && !over ? `<button class="link" data-act="tidy">整理</button>` : ""}</div>
-    <div class="board">${boardHtml(view)}</div>
     <div class="sec">成员<button class="link" data-act="settings">编辑</button></div>
     ${members}
-    <div class="member">${avatar(person("USER"), true)}<div><div class="n">${esc(nameOf("USER"))}</div><div class="h">决策者 · 压轴发言</div></div></div>`;
+    <div class="member">${avatar(person("USER"), true)}<div><div class="n">${esc(nameOf("USER"))}</div><div class="h">决策者 · 压轴发言</div></div></div>
+    <div class="sec">白板${canTidy && !over ? `<button class="link" data-act="tidy">整理</button>` : ""}</div>
+    <div class="board">${boardHtml(view)}</div>`;
 }
 
 async function refreshView({ toEnd = false, switched = false } = {}) {
@@ -691,9 +696,12 @@ const exportDiscussion = guarded(async (id) => {
 const ZOOM = { small: 0.9, medium: 1, large: 1.12, xlarge: 1.25 };
 
 function applyAppearance() {
-  const { theme, text_size: size } = state.settings;
+  const { theme, text_size: size, list_hidden: hidden } = state.settings;
   const root = document.documentElement;
   if (theme === "auto") root.removeAttribute("data-theme"); else root.dataset.theme = theme;
+  document.querySelector(".app").classList.toggle("list-hidden", hidden);
+  Object.assign($("foldButton"), hidden ? { textContent: "›", title: "展开讨论目录" }
+    : { textContent: "‹", title: "收起讨论目录(不让旁人看到聊过什么)" });
   const zoom = ZOOM[size] ?? 1;
   if (window.webkit?.messageHandlers?.app) tellApp({ type: "appearance", theme, zoom });
   else document.body.style.zoom = zoom;                     // 在普通浏览器里的替代做法
@@ -706,6 +714,13 @@ function zoom(src) {
   veil.onclick = () => veil.remove();
   $("overlay").append(veil);
 }
+
+// 改一两项设置并立刻生效。界面的折叠状态也记在设置里:重启后还是原样,收起来的不会自己露出来
+const saveSetting = guarded(async (changes) => {
+  state.settings = await api.saveSettings({ ...state.settings, ...changes });
+  applyAppearance();
+  renderList();
+});
 
 // ── 设置 ──────────────────────────────────────────────────────────────────
 const KIND_LABEL = { claude: "订阅 · Claude Code", codex: "订阅 · Codex", ollama: "本地模型 · Ollama", command: "命令行工具", user: "你自己" };
@@ -847,6 +862,12 @@ function openSettings() {
 // ── 事件 ──────────────────────────────────────────────────────────────────
 const ACTIONS = {
   open: (target) => open(target.dataset.id),
+  toggleList: () => saveSetting({ list_hidden: !state.settings.list_hidden }),
+  foldGroup: (target) => {
+    const folded = state.settings.folded_groups;
+    const key = target.dataset.group;
+    saveSetting({ folded_groups: folded.includes(key) ? folded.filter((group) => group !== key) : [...folded, key] });
+  },
   new: newDiscussion,
   settings: openSettings,
   send: () => send(),
@@ -879,6 +900,7 @@ document.addEventListener("click", (event) => {
   const target = event.target.closest("[data-act]");
   if (target && ACTIONS[target.dataset.act] && !target.closest(".set")) ACTIONS[target.dataset.act](target);
 });
+$("foldButton").dataset.act = "toggleList";
 $("newButton").dataset.act = "new";
 $("settingsButton").dataset.act = "settings";
 let searchTimer;
