@@ -433,6 +433,21 @@ function acceptDroppedFiles() {
   });
 }
 
+// 标题栏和输入区浮在发言上面(毛玻璃),发言从它们下面滑过。
+// 所以要把两者的高度告诉样式,让发言区留出上下边距;原本停在末尾的,高度变了以后仍然停在末尾
+function trackBars() {
+  const [mid, chat] = [$("mid"), $("chat")];
+  const measure = () => {
+    const atEnd = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;
+    mid.style.setProperty("--head-h", `${$("head").offsetHeight}px`);
+    mid.style.setProperty("--compose-h", `${$("compose").offsetHeight}px`);
+    if (atEnd) chat.scrollTop = chat.scrollHeight;
+  };
+  const observer = new ResizeObserver(measure);
+  observer.observe($("head"));
+  observer.observe($("compose"));
+}
+
 function autosize() {
   const input = $("input");
   input.style.height = "auto";
@@ -587,8 +602,8 @@ function renderSide() {
       ${canTidy && over ? `<div class="actions"><button class="btn primary small" data-act="tidy">让 AI 整理白板</button></div>` : ""}
     </div>
     <div class="sec">成员<button class="link" data-act="settings">编辑</button></div>
-    ${members}
-    <div class="member">${avatar(person("USER"), true)}<div><div class="n">${esc(nameOf("USER"))}</div><div class="h">决策者 · 压轴发言</div></div></div>
+    <div class="members">${members}
+      <div class="member">${avatar(person("USER"), true)}<div><div class="n">${esc(nameOf("USER"))}</div><div class="h">决策者 · 压轴发言</div></div></div></div>
     <div class="sec">白板${canTidy && !over ? `<button class="link" data-act="tidy">整理</button>` : ""}</div>
     <div class="board">${boardHtml(view)}</div>`;
 }
@@ -949,6 +964,7 @@ function listen() {
 
 guarded(async () => {
   buildComposer();
+  trackBars();
   state.settings = await api.settings();
   applyAppearance();
   await refreshList();
